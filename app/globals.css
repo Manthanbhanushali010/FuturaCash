@@ -1,0 +1,14 @@
+/* Design tokens — see context/ui-context.md. Components use these vars, never raw hex. */
+:root {
+  --bg-base: #0A1424;
+  --bg-surface: #111E33;
+  --bg-surface-2: #16263F;
+  --text-primary: #E8EEF5;
+  --text-muted: #8A9BB0;
+  --accent-primary: #4C82F7;
+  --accent-ai: #8B5CF6;
+  --border-default: #24344C;
+  --state-error: #E5484D;   /* negative cash / overdraft */
+  --state-success: #30A46C; /* positive cash */
+}
+html, body { background: var(--bg-base); color: var(--text-primary); margin: 0; }

@@ -1,0 +1,71 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Every tenant-owned row carries tenantId. Row-Level Security is enforced in the database
+// (see infra/ migrations) so isolation cannot be bypassed in app code — invariant #3.
+
+model Tenant {
+  id        String        @id @default(cuid())
+  name      String
+  createdAt DateTime      @default(now())
+  users     User[]
+  accounts  BankAccount[]
+}
+
+model User {
+  id        String   @id @default(cuid())
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id])
+  email     String   @unique
+  createdAt DateTime @default(now())
+
+  @@index([tenantId])
+}
+
+enum Provider {
+  STARLING
+  XERO
+  AGGREGATOR
+  MANUAL
+}
+
+model BankAccount {
+  id           String        @id @default(cuid())
+  tenantId     String
+  tenant       Tenant        @relation(fields: [tenantId], references: [id])
+  provider     Provider
+  externalId   String
+  name         String
+  currency     String        // ISO 4217, e.g. "GBP"
+  createdAt    DateTime      @default(now())
+  transactions Transaction[]
+
+  @@unique([tenantId, provider, externalId])
+  @@index([tenantId])
+}
+
+// APPEND-ONLY (invariant #1): source transactions are never mutated; everything the user
+// sees is derived. Money is integer minor units (invariant #4): amountMinor is pennies,
+// never a float. The unique constraint makes ingestion idempotent.
+model Transaction {
+  id          String      @id @default(cuid())
+  tenantId    String
+  accountId   String
+  account     BankAccount @relation(fields: [accountId], references: [id])
+  externalId  String      // provider's id
+  amountMinor Int         // integer minor units; negative = outflow
+  currency    String      // ISO 4217
+  bookedAt    DateTime
+  description String
+  raw         Json        // original payload, for audit/traceability
+  ingestedAt  DateTime    @default(now())
+
+  @@unique([tenantId, accountId, externalId]) // idempotency
+  @@index([tenantId, accountId, bookedAt])
+}

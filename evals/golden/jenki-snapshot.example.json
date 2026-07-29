@@ -1,0 +1,19 @@
+{
+  "asOf": "2026-06-01",
+  "tolerance": { "type": "absolute_minor", "value": 100 },
+  "_note": "Amounts are integer minor units (pennies). Replace with JENKI's real snapshot.",
+  "clearedBalances": [
+    { "provider": "STARLING", "account": "Business GBP", "currency": "GBP", "balanceMinor": 0 },
+    { "provider": "AGGREGATOR", "account": "HSBC Current", "currency": "GBP", "balanceMinor": 0 }
+  ],
+  "committed": [
+    { "kind": "RECEIVABLE", "currency": "GBP", "amountMinor": 0, "source": "XERO" },
+    { "kind": "PAYABLE", "currency": "GBP", "amountMinor": 0, "source": "XERO" }
+  ],
+  "expectedPosition": {
+    "currency": "GBP",
+    "clearedCashMinor": 0,
+    "committedInMinor": 0,
+    "committedOutMinor": 0
+  }
+}
