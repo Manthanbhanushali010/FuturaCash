@@ -8,3 +8,6 @@ dist/
 /prisma/migrations/dev.db
 __pycache__/
 .venv/
+
+# Local Xero dev token store — live credentials for a real accounting org.
+.xero-tokens.local.json

@@ -28,12 +28,26 @@ layer in `integrations/`. Money is always integer minor units. Full detail in
 ## Getting started
 
 ```bash
-cp .env.example .env          # fill in credentials
-docker compose up -d          # local Postgres
+cp .env.example .env.local    # fill in credentials
+docker compose up -d          # local Postgres (not needed for Spec 1)
 npm install
-npm run db:generate && npm run db:migrate
 npm run dev                   # http://localhost:3000
 ```
+
+### Connect Xero (Spec 1)
+
+1. At [developer.xero.com/app/manage](https://developer.xero.com/app/manage), create a
+   **Web app** and add the redirect URI `http://localhost:3000/api/xero/callback`.
+2. Put its client id and secret into `.env.local` as `XERO_CLIENT_ID` /
+   `XERO_CLIENT_SECRET`, and restart `npm run dev`.
+3. Open <http://localhost:3000/xero> and click **Connect to Xero**. Authorise the
+   **Demo Company (UK)**.
+4. Invoices and the chart of accounts render on the same page.
+
+Only read scopes are requested (`accounting.*.read`), so Xero itself blocks any write —
+invariant #2 is enforced at the provider, not merely by our own discipline. Tokens are
+stored in `.xero-tokens.local.json` (gitignored, `0600`) for local development only; a
+secret manager replaces it before anything is deployed.
 
 ## Verify
 

@@ -1,3 +1,7 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
 /* Design tokens — see context/ui-context.md. Components use these vars, never raw hex. */
 :root {
   --bg-base: #0A1424;
@@ -10,5 +14,15 @@
   --border-default: #24344C;
   --state-error: #E5484D;   /* negative cash / overdraft */
   --state-success: #30A46C; /* positive cash */
+
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Inter, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", "IBM Plex Mono", Menlo, monospace;
 }
-html, body { background: var(--bg-base); color: var(--text-primary); margin: 0; }
+html, body { background: var(--bg-base); color: var(--text-primary); margin: 0; font-family: var(--font-sans); }
+
+/* Every monetary figure renders in mono with tabular figures so columns align (ui-context.md). */
+.figure {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+}

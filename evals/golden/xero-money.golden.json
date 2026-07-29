@@ -1,0 +1,37 @@
+{
+  "description": "Golden money conversions for the Xero boundary. Each case is a decimal as it arrives from Xero's JSON and the exact integer minor units it must become. `naiveRoundWrong` marks values where Math.round(value * 10^digits) gives the wrong answer; `naiveToFixedWrong` marks values where value.toFixed(digits) does. The two sets are disjoint — that is the point.",
+  "source": "Xero Accounting API amount fields (Total, AmountDue, AmountPaid, SubTotal, TotalTax)",
+  "cases": [
+    { "value": 0, "digits": 2, "expected": 0, "note": "zero" },
+    { "value": 0.01, "digits": 2, "expected": 1, "note": "one penny" },
+    { "value": 12, "digits": 2, "expected": 1200, "note": "whole pounds, no decimal point" },
+    { "value": 12.5, "digits": 2, "expected": 1250, "note": "one decimal place" },
+    { "value": 1234.55, "digits": 2, "expected": 123455, "note": "ordinary invoice total" },
+    { "value": 1234567.89, "digits": 2, "expected": 123456789, "note": "large total" },
+    { "value": -99.99, "digits": 2, "expected": -9999, "note": "credit note" },
+    { "value": -480000.0, "digits": 2, "expected": -48000000, "note": "JENKI week-8 trough" },
+    { "value": 20.0, "digits": 2, "expected": 2000, "note": "trailing zero decimal" },
+    { "value": 0.1, "digits": 2, "expected": 10, "note": "classic float 0.1" },
+    { "value": 0.2, "digits": 2, "expected": 20, "note": "classic float 0.2" },
+    { "value": 0.3, "digits": 2, "expected": 30, "note": "0.1 + 0.2 territory" },
+    { "value": 4.35, "digits": 2, "expected": 435, "note": "stored as 4.34999...; both naive paths survive this one" },
+
+    { "value": 1.005, "digits": 2, "expected": 101, "rounding": "half-up", "naiveRoundWrong": true },
+    { "value": 0.145, "digits": 2, "expected": 15, "rounding": "half-up", "naiveRoundWrong": true },
+    { "value": 1.255, "digits": 2, "expected": 126, "rounding": "half-up", "naiveRoundWrong": true },
+    { "value": 8.165, "digits": 2, "expected": 817, "rounding": "half-up", "naiveRoundWrong": true },
+    { "value": 10.075, "digits": 2, "expected": 1008, "rounding": "half-up", "naiveRoundWrong": true },
+
+    { "value": 0.615, "digits": 2, "expected": 62, "rounding": "half-up", "naiveToFixedWrong": true },
+    { "value": 1.045, "digits": 2, "expected": 105, "rounding": "half-up", "naiveToFixedWrong": true },
+    { "value": 1.115, "digits": 2, "expected": 112, "rounding": "half-up", "naiveToFixedWrong": true },
+    { "value": 1.365, "digits": 2, "expected": 137, "rounding": "half-up", "naiveToFixedWrong": true },
+    { "value": 2.045, "digits": 2, "expected": 205, "rounding": "half-up", "naiveToFixedWrong": true },
+    { "value": 2.675, "digits": 2, "expected": 268, "rounding": "half-up", "naiveToFixedWrong": true },
+
+    { "value": "10.2549", "digits": 4, "expected": 102549, "note": "4dp unit price" },
+    { "value": "0.0001", "digits": 4, "expected": 1, "note": "smallest 4dp unit" },
+    { "value": 1500, "digits": 0, "expected": 1500, "note": "JPY has no minor unit" },
+    { "value": "99999999.99", "digits": 2, "expected": 9999999999, "note": "upper end of a real ledger" }
+  ]
+}
