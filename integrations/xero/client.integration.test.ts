@@ -37,7 +37,7 @@ function connectedState(overrides: Partial<XeroTokenState> = {}): XeroTokenState
     accessToken: "access-live",
     refreshToken: "refresh-live",
     expiresAt: Date.now() + 30 * 60 * 1000,
-    scope: "accounting.transactions.read",
+    scope: "accounting.invoices.read",
     connections: [
       { connectionId: "c-1", tenantId: TENANT, tenantName: "Demo Company (UK)", tenantType: "ORGANISATION" },
     ],

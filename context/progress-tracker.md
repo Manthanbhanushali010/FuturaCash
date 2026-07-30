@@ -66,6 +66,14 @@ Update this file after every meaningful implementation change.
   shapes past the anti-corruption boundary.
 - **Read-only OAuth scopes only** (`accounting.*.read`) — invariant #2 enforced by Xero
   itself, not just by our discipline. Requesting a write scope would need a written decision.
+- **Xero granular scopes** (2 March 2026 change) — the broad `accounting.transactions`
+  scope is not grantable to any app created on or after that date; the authorize endpoint
+  rejects the whole request with `invalid_scope` before the consent screen renders. Our app
+  is post-cutoff, so `/Invoices` uses `accounting.invoices.read`. Beware older tutorials and
+  sample code: apps created before the cutoff keep the broad scope until September 2027, so
+  a working example elsewhere proves nothing here. Bank transactions will need
+  `accounting.banktransactions.read` when Spec 2 reaches reconciliation.
+  See <https://developer.xero.com/faq/granular-scopes>.
 - **String-based decimal → minor units** (`core/decimal.ts`) — provider money arrives as a
   JSON number, and BOTH naive conversions are wrong on different values:
   `Math.round(1.005 * 100)` is 100, and `(1.045).toFixed(2)` is "1.04". Neither can check

@@ -10,7 +10,7 @@ const tokens: TokenResponse = {
   refresh_token: "refresh-1",
   expires_in: 1800,
   token_type: "Bearer",
-  scope: "accounting.transactions.read offline_access",
+  scope: "accounting.invoices.read offline_access",
 };
 
 function connection(id: string, name: string): XeroTenantConnection {

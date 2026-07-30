@@ -13,15 +13,31 @@ export const XERO_API_BASE = "https://api.xero.com/api.xro/2.0";
 /**
  * Read-only scopes only. Invariant #2: no code path moves money, so we never request a
  * write scope — Xero itself then enforces it, not just our discipline.
+ *
+ * GRANULAR SCOPES (Xero, 2 March 2026). The broad `accounting.transactions` scope and its
+ * `.read` variant are deprecated and are simply not grantable to any app created on or
+ * after that date — the authorize endpoint rejects the whole request with `invalid_scope`
+ * before the consent screen renders. It is replaced by per-resource scopes; `/Invoices`
+ * needs `accounting.invoices.read`. Apps created before the cutoff keep the broad scope
+ * until September 2027, so a working example from an older codebase will mislead you here.
+ * https://developer.xero.com/faq/granular-scopes
+ *
+ * Each scope below is here because a specific endpoint needs it — least privilege:
+ *   accounting.settings.read  → GET /Organisation, GET /Accounts (chart of accounts)
+ *   accounting.invoices.read  → GET /Invoices (sales invoices and bills)
+ *   accounting.contacts.read  → the Contact on each invoice (counterparty names)
+ *
+ * Reading Xero's own bank transactions for reconciliation will need
+ * `accounting.banktransactions.read` — add it when Spec 2 needs it, not before.
  */
 export const XERO_SCOPES = [
   "openid",
   "profile",
   "email",
   "offline_access",
-  "accounting.transactions.read",
-  "accounting.contacts.read",
   "accounting.settings.read",
+  "accounting.invoices.read",
+  "accounting.contacts.read",
 ] as const;
 
 /** Xero: 60 calls/min and 5,000/day per org. Chart of accounts barely changes — cache it. */

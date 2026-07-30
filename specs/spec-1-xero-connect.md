@@ -35,8 +35,8 @@ integer number of pennies that matches Xero's own UI exactly.
 
 - When the operator visits `/api/xero/connect`, the system shall redirect to Xero's
   consent screen requesting exactly the scopes
-  `openid profile email accounting.transactions.read accounting.contacts.read
-  accounting.settings.read offline_access`.
+  `openid profile email offline_access accounting.settings.read accounting.invoices.read
+  accounting.contacts.read`.
 - When Xero redirects back to `/api/xero/callback` with a valid `code` and a `state`
   matching the one issued, the system shall exchange the code for an access token and a
   refresh token, and shall persist neither in source control nor in logs.
