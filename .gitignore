@@ -1,7 +1,5 @@
 node_modules/
 .next/
-.env
-.env.local
 *.log
 dist/
 .DS_Store
@@ -9,5 +7,13 @@ dist/
 __pycache__/
 .venv/
 
-# Local Xero dev token store — live credentials for a real accounting org.
+# Secrets. Deny every .env variant, then re-allow only the committed template — so a new
+# .env.production or .env.staging is ignored by default rather than by remembering to
+# add it. The template must stay placeholder-only; real values never leave the machine.
+.env
+.env.*
+!.env.example
+
+# Provider token stores — live credentials for real accounting/banking orgs.
 .xero-tokens.local.json
+*.tokens.local.json
