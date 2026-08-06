@@ -1,5 +1,29 @@
 # UI Context
 
+## Two visual layers
+
+The product has **two deliberately separate palettes**, and they must not be merged:
+
+| Layer | Where | Palette |
+| ----- | ----- | ------- |
+| **App / treasury UI** | `/xero` and every future product screen | the tokens documented below |
+| **Marketing** | the landing page at `/` only | the Futura tokens from the Lovable design |
+
+The reasoning: a data-dense treasury workspace and a marketing page have different
+jobs. The app palette is tuned for reading columns of figures for an hour; the
+marketing palette is tuned for a first impression. Forcing one on the other degrades
+both.
+
+The marketing tokens are prefixed `--futura-*` in `app/globals.css` and are **scoped
+by the `.futura-landing` wrapper class** on `app/page.tsx`. Where a Tailwind key is
+shared (`surface`, `rounded-lg`, `rounded-xl`), the wrapper re-points the underlying
+CSS variable rather than the Tailwind key, so the app value is unchanged everywhere
+outside that wrapper. Nothing in `components/marketing/` may be used in a product
+screen, and nothing in the app palette should be used on the landing page.
+
+Marketing components live in `components/marketing/` — separate from
+`components/ui/`, which stays reserved for generated shadcn components.
+
 ## Theme
 
 Dark only. No light mode. A dark technical finance workspace — deep navy near-black
@@ -31,6 +55,28 @@ Notes:
   subtle violet treatment, sparingly.
 - Money values: positive in `--text-primary` or `--state-success` where emphasis helps;
   negative always in `--state-error`.
+
+## Marketing palette (landing page only)
+
+Ported from the Lovable design (`futura-cash-flow-vision`), which is Tailwind v4;
+these are the v3 equivalents. Scoped to `.futura-landing` — never use on a product screen.
+
+| Role              | CSS Variable                 | Value       | Tailwind key       |
+| ----------------- | ---------------------------- | ----------- | ------------------ |
+| Page background   | `--futura-navy`              | `#0B1526`   | `navy`             |
+| Surface           | *(re-points `--bg-surface-rgb`)* | `#12213B` | `surface`        |
+| Raised surface    | `--futura-surface-elevated`  | `#182B4A`   | `surface-elevated` |
+| Accent            | `--futura-accent-blue`       | `#4C82F7`   | `accent-blue`      |
+| Primary text      | `--futura-text-primary`      | `#F5F7FB`   | `text-primary`     |
+| Secondary text    | `--futura-text-secondary`    | `#A0AEC8`   | `text-secondary`   |
+| Tertiary text     | `--futura-text-tertiary`     | `#6B7A99`   | `text-tertiary`    |
+| Divider           | `--futura-divider`           | `rgb(148 163 184 / 0.12)` | `divider` |
+
+Colours needing opacity modifiers are stored as RGB channel triplets so Tailwind can
+apply `<alpha-value>`. Custom utilities `radial-glow`, `glow-blue` and `glow-blue-sm`
+are the ported equivalents of the Lovable `@utility` blocks. The marketing layer also
+overrides `--radius-lg` (0.75rem) and `--radius-xl` (1rem) within its wrapper; the app
+scale is unchanged.
 
 ## Typography
 

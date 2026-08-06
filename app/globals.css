@@ -5,7 +5,8 @@
 /* Design tokens — see context/ui-context.md. Components use these vars, never raw hex. */
 :root {
   --bg-base: #0A1424;
-  --bg-surface: #111E33;
+  --bg-surface-rgb: 17 30 51;            /* #111E33, channels so Tailwind can apply opacity */
+  --bg-surface: rgb(var(--bg-surface-rgb));
   --bg-surface-2: #16263F;
   --text-primary: #E8EEF5;
   --text-muted: #8A9BB0;
@@ -25,4 +26,49 @@ html, body { background: var(--bg-base); color: var(--text-primary); margin: 0; 
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
   font-feature-settings: "tnum";
+}
+
+/* ---------------------------------------------------------------------------
+ * Futura marketing layer — landing page only.
+ *
+ * A deliberately separate palette from the app tokens above (see the palette
+ * decision in context/ui-context.md). Ported from the Lovable design system,
+ * which is Tailwind v4; these are the v3 equivalents of its @theme block.
+ * ------------------------------------------------------------------------- */
+:root {
+  --futura-navy: 11 21 38;               /* #0B1526 */
+  --futura-surface-elevated: 24 43 74;   /* #182B4A */
+  --futura-accent-blue: 76 130 247;      /* #4C82F7 */
+  --futura-text-primary: #F5F7FB;
+  --futura-text-secondary: #A0AEC8;
+  --futura-text-tertiary: #6B7A99;
+  --futura-divider: rgb(148 163 184 / 0.12);
+  --futura-accent-blue-glow: rgb(76 130 247 / 0.35);
+  --futura-sans: "Inter", "IBM Plex Sans", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+/* Scoped overrides. Re-pointing the variable rather than the Tailwind key is what
+ * keeps bg-surface at #111E33 and rounded-lg/xl at the app scale everywhere else. */
+.futura-landing {
+  --bg-surface-rgb: 18 33 59;            /* #12213B — marketing surface */
+  --radius-lg: 0.75rem;
+  --radius-xl: 1rem;
+}
+
+@layer base {
+  .futura-landing {
+    font-family: var(--futura-sans);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+  /* In the base layer so per-heading tracking utilities still win. */
+  .futura-landing :is(h1, h2, h3, h4, h5, h6) { letter-spacing: -0.02em; }
+}
+
+@layer utilities {
+  .radial-glow {
+    background: radial-gradient(circle at 50% 0%, rgb(76 130 247 / 0.15) 0%, transparent 60%);
+  }
+  .glow-blue { box-shadow: 0 0 60px -12px var(--futura-accent-blue-glow); }
+  .glow-blue-sm { box-shadow: 0 0 40px -16px var(--futura-accent-blue-glow); }
 }
