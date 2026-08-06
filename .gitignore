@@ -17,3 +17,4 @@ __pycache__/
 # Provider token stores — live credentials for real accounting/banking orgs.
 .xero-tokens.local.json
 *.tokens.local.json
+.recovered-sessions/
