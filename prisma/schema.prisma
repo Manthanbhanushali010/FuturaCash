@@ -4,11 +4,18 @@ generator client {
 
 datasource db {
   provider = "postgresql"
-  url      = env("DATABASE_URL")
+  // Pooled endpoint (PgBouncer, transaction mode) for application queries.
+  url       = env("DATABASE_URL")
+  // Direct endpoint for migrations. Prisma Migrate takes a Postgres advisory lock, which
+  // transaction-mode pooling does not support, so DDL must bypass the pooler.
+  directUrl = env("DIRECT_DATABASE_URL")
 }
 
 // Every tenant-owned row carries tenantId. Row-Level Security is enforced in the database
-// (see infra/ migrations) so isolation cannot be bypassed in app code — invariant #3.
+// (see prisma/migrations/*_init_with_rls) so isolation cannot be bypassed in app code —
+// invariant #3. Policies match `tenantId` against `current_setting('app.tenant_id')`, which
+// the application must set per transaction; see the migration's header comment for why it is
+// transaction-scoped rather than session-scoped.
 
 model Tenant {
   id        String        @id @default(cuid())
