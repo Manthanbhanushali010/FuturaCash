@@ -21,8 +21,9 @@ model Tenant {
   id        String        @id @default(cuid())
   name      String
   createdAt DateTime      @default(now())
-  users     User[]
-  accounts  BankAccount[]
+  users       User[]
+  accounts    BankAccount[]
+  tokenGrants ProviderTokenGrant[]
 }
 
 model User {
@@ -75,4 +76,44 @@ model Transaction {
 
   @@unique([tenantId, accountId, externalId]) // idempotency
   @@index([tenantId, accountId, bookedAt])
+}
+
+// OAuth grants for external providers — Xero today, the bank aggregator in Spec 2.
+// Provider-keyed rather than Xero-specific: the aggregator grant has an identical shape,
+// and a second near-duplicate table would be the only alternative.
+//
+// These rows are CREDENTIALS (invariant #7). Two consequences:
+//   - Tokens are stored as ciphertext, never plaintext. The application encrypts with
+//     AES-256-GCM before writing; keyVersion identifies the key so rotation does not
+//     require re-authorising every tenant. The database never sees a usable token.
+//   - RLS matters more here than anywhere else. A cross-tenant read of this table is not
+//     a data leak, it is handing over the keys to another company's accounting system.
+//
+// Unlike Transaction this is NOT append-only: Xero rotates the refresh token on every
+// refresh, so the row must be updatable in place.
+model ProviderTokenGrant {
+  id       String   @id @default(cuid())
+  tenantId String
+  tenant   Tenant   @relation(fields: [tenantId], references: [id])
+  provider Provider
+
+  /// The provider's own org identifier — Xero's tenantId. Deliberately NOT named
+  /// tenantId: that column is OUR customer, and conflating the two would be a
+  /// cross-tenant bug waiting to happen.
+  externalTenantId String?
+
+  accessTokenCipher  Bytes
+  refreshTokenCipher Bytes
+  /// Which encryption key produced the ciphertext above. Lets keys rotate forward.
+  keyVersion Int @default(1)
+
+  expiresAt   DateTime // access token expiry
+  scope       String // scopes actually granted, to detect a stale consent
+  connections Json // provider's authorised orgs, verbatim
+  connectedAt DateTime
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([tenantId, provider]) // one live grant per provider per tenant
+  @@index([tenantId])
 }

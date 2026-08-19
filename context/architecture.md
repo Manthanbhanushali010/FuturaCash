@@ -13,7 +13,7 @@
 | Bank data    | Open Banking aggregator (TrueLayer / Yapily) | Balances + transactions; aggregator holds the AIS licence |
 | Accounting   | Xero API (OAuth2)                   | Invoices, bills, chart of accounts, contacts                |
 | Jobs         | Inngest (or managed queue)          | Async ingestion, reconciliation, forecast refresh           |
-| Secrets      | Secret manager (Doppler / cloud)    | Bank + Xero tokens; never in code                           |
+| Secrets      | Env (app config) + Postgres (OAuth grants, encrypted) | Static config in the platform's env store; rotating per-tenant OAuth tokens in `ProviderTokenGrant`, AES-256-GCM, never in code |
 | Observability| Sentry + structured logs + audit log| Errors, traceability, access auditing                       |
 
 ## System Boundaries
@@ -36,7 +36,15 @@
   projections (positions, forecasts, variances); accounts, products, tags, tenant and
   user metadata; ownership and relationships. Money stored as integer minor units with
   an explicit currency code.
-- **Secret manager**: bank and Xero access/refresh tokens and all credentials.
+- **Postgres (`ProviderTokenGrant`)**: bank and Xero access/refresh tokens, stored as
+  AES-256-GCM ciphertext with a key version, one row per tenant per provider, RLS-protected.
+  A dedicated secret manager was rejected: those are built for config that changes monthly,
+  not per-tenant OAuth tokens that rotate every 30 minutes, and they provide no lock
+  primitive for serialising refreshes. Static config (API keys, client secrets) stays in the
+  deployment platform's env store.
+- **Database roles**: the application connects as `futura_app`, which holds no `BYPASSRLS`
+  attribute and owns nothing. Migrations run as the database owner. This split is what makes
+  invariant #3 real — RLS policies cannot constrain a role that can bypass them.
 - **Object storage**: generated report exports (board packs, lender PDFs) — large
   generated artifacts do not live in the database.
 

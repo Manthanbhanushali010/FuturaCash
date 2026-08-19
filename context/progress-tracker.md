@@ -39,9 +39,18 @@ Update this file after every meaningful implementation change.
   shadcn components were left behind. "Get started" and "Log in" point at `/xero`.
   Verified `/xero` unchanged: same live figures, 96 tests, clean build.
 
+- **Production database with enforced tenant isolation** (2026-08-19, `feature/production-hardening`).
+  Neon Postgres migrated: `Tenant`, `User`, `BankAccount`, `Transaction`, `ProviderTokenGrant`,
+  all five with RLS enabled AND forced, in the initial migration — no bare tables retrofitted.
+  `Transaction` has SELECT and INSERT policies only, so UPDATE and DELETE are denied by the
+  database: invariant #1 is now a Postgres guarantee, not a convention. Verified with a live
+  probe as the app role: no context → zero rows; tenant B cannot see tenant A's transactions
+  or token grants; UPDATE and DELETE on an owned ledger row affect zero rows.
+
 ## In Progress
 
-- Nothing in flight. Next unit not started.
+- **Phase 4 — token storage to the database.** Schema and isolation are done; the
+  `DbXeroTokenStore` code is not written. See Next Up.
 
 ## Next Up
 
@@ -111,7 +120,22 @@ Update this file after every meaningful implementation change.
 - **Token refresh is serialised in-process** — Xero refresh tokens are single-use, so two
   concurrent refreshes would kill the connection until re-authorisation.
 - **Token storage behind a `XeroTokenStore` interface** — a gitignored local file for the
-  spike; Postgres + secret manager swap in for Spec 2 without changing call sites.
+  spike; Postgres swaps in for Spec 2 without changing call sites.
+- **Dedicated non-bypassing database role** (2026-08-19) — `neondb_owner` carries the
+  `BYPASSRLS` attribute (directly and via `neon_superuser`), which outranks
+  `FORCE ROW LEVEL SECURITY`. Proven empirically: with the owner connection, a query with no
+  tenant context returned every tenant's rows despite correct policies. The application now
+  connects as `futura_app` (`NOBYPASSRLS`, owns nothing, DML only); the owner is used solely
+  for migrations. **Configured RLS is not enforced RLS — always verify with a live
+  cross-tenant probe as the role the app actually uses.**
+- **Tenant context is transaction-scoped, not session-scoped** (2026-08-19) — the app reaches
+  Neon through PgBouncer in transaction mode, where a connection is handed to a different
+  client between statements. A session-level `SET` would leak one tenant's context into
+  another tenant's query. All tenant-scoped work runs inside a transaction that first calls
+  `set_config('app.tenant_id', $1, true)`. With no context the predicate is NULL and the
+  query returns nothing — it fails closed.
+- **Migrations bypass the pooler** (2026-08-19) — `directUrl` in `schema.prisma`. Prisma
+  Migrate takes a Postgres advisory lock, which transaction-mode pooling does not support.
 - **Two separate visual layers** (2026-08-06) — the marketing palette from the Lovable
   design and the app palette in `ui-context.md` are kept apart rather than reconciled. A
   data-dense treasury workspace and a landing page have different jobs; merging them would
