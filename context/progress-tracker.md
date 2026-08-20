@@ -136,6 +136,19 @@ Update this file after every meaningful implementation change.
   query returns nothing — it fails closed.
 - **Migrations bypass the pooler** (2026-08-19) — `directUrl` in `schema.prisma`. Prisma
   Migrate takes a Postgres advisory lock, which transaction-mode pooling does not support.
+- **Interim auth: shared password in `XERO_PAGE_PASSWORD`** (2026-08-20) — a deliberate
+  placeholder, not the auth model. WorkOS remains the plan; this exists only to close the
+  window between tokens becoming persistent and real auth landing. Until it ships, `/xero`
+  is publicly reachable, which is acceptable only because nothing persists yet. It must gate
+  the **page and the `/api/xero/*` routes**, not merely hide the Connect button — the page
+  itself renders financial data, and the connect route is reachable directly by URL. Build
+  it in phase B3, before token persistence goes live.
+- **A connection string can silently disable RLS** (2026-08-20) — `DATABASE_URL` was
+  edited to `neondb_owner` while rotating the owner password, and tenant isolation switched
+  off with no error, no failed test, and no symptom; `pg_policies` still looked perfect.
+  Correct end state: `DATABASE_URL` = `futura_app` @ pooled host, `DIRECT_DATABASE_URL` =
+  `neondb_owner` @ direct host — different roles, different passwords, different hosts, never
+  matching. **Re-run the live cross-tenant probe after any change to a connection string.**
 - **Two separate visual layers** (2026-08-06) — the marketing palette from the Lovable
   design and the app palette in `ui-context.md` are kept apart rather than reconciled. A
   data-dense treasury workspace and a landing page have different jobs; merging them would
