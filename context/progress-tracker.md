@@ -47,10 +47,19 @@ Update this file after every meaningful implementation change.
   probe as the app role: no context → zero rows; tenant B cannot see tenant A's transactions
   or token grants; UPDATE and DELETE on an owned ledger row affect zero rows.
 
+- **Phase B1 — database-backed token store** (2026-08-21). `DbXeroTokenStore` replaces
+  `FileXeroTokenStore` in deployed environments, storing OAuth grants in `ProviderTokenGrant`
+  as AES-256-GCM ciphertext. The tenant is injected at construction, so `read`/`write`/`clear`
+  keep their signatures and no call site changed. `refreshInFlight` — an in-process mutex,
+  meaningless across serverless instances — is replaced by `withRefreshLock` on the store:
+  the file store keeps an in-process queue, the database store takes
+  `pg_advisory_xact_lock`. `client.ts` changed only to call it and to re-read under the lock.
+  131 tests green (was 96).
+
 ## In Progress
 
-- **Phase 4 — token storage to the database.** Schema and isolation are done; the
-  `DbXeroTokenStore` code is not written. See Next Up.
+- **Phase B2 — prove persistence end to end.** Connect locally against Neon, restart the
+  dev server, confirm `/xero` is still connected without re-authorising.
 
 ## Next Up
 
@@ -136,6 +145,22 @@ Update this file after every meaningful implementation change.
   query returns nothing — it fails closed.
 - **Migrations bypass the pooler** (2026-08-19) — `directUrl` in `schema.prisma`. Prisma
   Migrate takes a Postgres advisory lock, which transaction-mode pooling does not support.
+- **Refresh serialisation belongs to the token store** (2026-08-21) — not to `client.ts`.
+  Only the store knows how far its lock reaches: one process for the file store, every
+  process for the database. An in-process promise in `client.ts` looked correct and did
+  nothing on serverless. `withRefreshLock` is now part of the `XeroTokenStore` interface, and
+  callers must re-read inside it, because whoever held the lock first has already rotated the
+  refresh token the caller was holding.
+- **Concurrency fixes need a test that can fail** (2026-08-21) — the lock test runs against
+  real Postgres with two independent connections, because any mock would "serialise" its own
+  calls and reproduce exactly the false confidence being fixed. It ships with a CONTROL case
+  asserting that *without* the lock the two connections do interleave; without that control,
+  the lock test could pass vacuously. Assert mutual exclusion, not ordering — which of two
+  network round-trips wins is not deterministic.
+- **`@prisma/client` loads `.env` at import** (2026-08-21) — so unsetting a variable in the
+  shell does not hide it from tests. The integration test's skip depends on `.env` being
+  absent, which is true in CI and false locally. Verified by moving `.env` aside: 125 pass,
+  6 skip.
 - **Interim auth: shared password in `XERO_PAGE_PASSWORD`** (2026-08-20) — a deliberate
   placeholder, not the auth model. WorkOS remains the plan; this exists only to close the
   window between tokens becoming persistent and real auth landing. Until it ships, `/xero`

@@ -1,5 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { isTokenEncryptionConfigured } from "./crypto";
+import { DbXeroTokenStore } from "./token-store.db";
 
 /**
  * Where Xero tokens live.
@@ -36,13 +38,30 @@ export interface XeroTokenStore {
   read(): Promise<XeroTokenState | null>;
   write(state: XeroTokenState): Promise<void>;
   clear(): Promise<void>;
+  /**
+   * Run `fn` as the only token refresh for this connection at a time.
+   *
+   * Xero rotates the refresh token on every refresh and the old one dies after a 30-minute
+   * grace window, so two concurrent refreshes leave one caller holding a spent token — a
+   * failure that appears half an hour later, far from its cause. The store owns this because
+   * only the store knows how far its serialisation actually reaches: one process for the
+   * file store, every process for the database.
+   *
+   * Callers must re-read inside the callback: by the time the lock is granted, another
+   * process may already have done the work.
+   */
+  withRefreshLock<T>(fn: () => Promise<T>): Promise<T>;
 }
 
 const DEV_STORE_FILENAME = ".xero-tokens.local.json";
 
 /**
  * Local-development store: one JSON file in the project root, gitignored, owner-read-only.
- * Not for any deployed environment — there, tokens belong in the secret manager.
+ *
+ * Not for any deployed environment. On Vercel `process.cwd()` is an ephemeral container
+ * filesystem — not shared between concurrent instances, and gone at the next cold start or
+ * deploy — so a connection made here would establish and then quietly disappear. Deployed
+ * environments use `DbXeroTokenStore`.
  */
 export class FileXeroTokenStore implements XeroTokenStore {
   private readonly filePath: string;
@@ -76,6 +95,19 @@ export class FileXeroTokenStore implements XeroTokenStore {
       if (!isNotFound(error)) throw error;
     }
   }
+
+  /** Serialised in-process. Sufficient here: one process, one file, one machine. */
+  private tail: Promise<unknown> = Promise.resolve();
+
+  async withRefreshLock<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.tail.then(fn, fn);
+    // Swallow only for the queue's own chaining — the caller still sees the rejection.
+    this.tail = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
 }
 
 function isNotFound(error: unknown): boolean {
@@ -84,9 +116,29 @@ function isNotFound(error: unknown): boolean {
 
 let defaultStore: XeroTokenStore | null = null;
 
+/**
+ * Database when it is fully configured, file otherwise.
+ *
+ * All three variables are required together on purpose. A half-configured database store
+ * would either fail at the first write or, worse, persist tokens it cannot encrypt — so an
+ * incomplete configuration falls back to the local file rather than degrading silently.
+ */
+function createDefaultStore(): XeroTokenStore {
+  const tenantId = process.env.APP_TENANT_ID;
+  if (process.env.DATABASE_URL && tenantId && isTokenEncryptionConfigured()) {
+    return new DbXeroTokenStore(tenantId);
+  }
+  return new FileXeroTokenStore();
+}
+
 export function getXeroTokenStore(): XeroTokenStore {
-  defaultStore ??= new FileXeroTokenStore();
+  defaultStore ??= createDefaultStore();
   return defaultStore;
+}
+
+/** Which store is active. Surfaced for diagnostics — never returns credentials. */
+export function describeXeroTokenStore(): "database" | "file" {
+  return getXeroTokenStore() instanceof DbXeroTokenStore ? "database" : "file";
 }
 
 /** Test seam — lets evals and tests substitute an in-memory store. */

@@ -178,20 +178,21 @@ export function toTokenState(
 
 // --- Token lifecycle --------------------------------------------------------
 
-/**
- * Serialises refreshes within the process.
- *
- * Xero refresh tokens are single-use: two concurrent refreshes race, and whichever lands
- * second presents an already-spent token, gets `invalid_grant`, and the connection is dead
- * until the user re-authorises. Two page loads at once is enough to trigger it.
- */
-let refreshInFlight: Promise<XeroTokenState> | null = null;
-
 export async function getConnectionState(): Promise<XeroTokenState | null> {
   return getXeroTokenStore().read();
 }
 
-/** Current access token, refreshed and re-persisted first if it is at or near expiry. */
+/**
+ * Current access token, refreshed and re-persisted first if it is at or near expiry.
+ *
+ * Xero refresh tokens are single-use: two concurrent refreshes race, and whichever lands
+ * second presents an already-spent token, gets `invalid_grant`, and the connection is dead
+ * until the user re-authorises. Two page loads at once is enough to trigger it.
+ *
+ * Serialisation is delegated to the store, because only the store knows how far its lock
+ * actually reaches — one process for the file store, every process for the database. An
+ * in-process promise here would look correct and do nothing on serverless.
+ */
 export async function getValidAccessToken(): Promise<XeroTokenState> {
   const store = getXeroTokenStore();
   const state = await store.read();
@@ -201,21 +202,23 @@ export async function getValidAccessToken(): Promise<XeroTokenState> {
     return state;
   }
 
-  refreshInFlight ??= (async () => {
-    try {
-      const tokens = await refreshTokens(state.refreshToken);
-      // Re-read connections: an org can be disconnected from inside Xero at any time.
-      const connections = await fetchConnections(tokens.access_token);
-      const next = toTokenState(tokens, connections, state, Date.now());
-      // Persist BEFORE returning — the rotated refresh token is now the only working one.
-      await store.write(next);
-      return next;
-    } finally {
-      refreshInFlight = null;
+  return store.withRefreshLock(async () => {
+    // Re-read under the lock. Waiting for it may have taken a while, and whoever held it
+    // before us has rotated the refresh token that `state` is still holding.
+    const current = await store.read();
+    if (!current) throw new XeroNotConnectedError();
+    if (Date.now() < current.expiresAt - TOKEN_REFRESH_LEEWAY_MS) {
+      return current;
     }
-  })();
 
-  return refreshInFlight;
+    const tokens = await refreshTokens(current.refreshToken);
+    // Re-read connections: an org can be disconnected from inside Xero at any time.
+    const connections = await fetchConnections(tokens.access_token);
+    const next = toTokenState(tokens, connections, current, Date.now());
+    // Persist BEFORE returning — the rotated refresh token is now the only working one.
+    await store.write(next);
+    return next;
+  });
 }
 
 // --- Authorised reads -------------------------------------------------------
