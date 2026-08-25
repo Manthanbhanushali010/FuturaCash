@@ -8,7 +8,8 @@ import type {
   NormalisedLedgerAccount,
 } from "../types";
 import { parseXeroDate } from "./dates";
-import type { XeroAccount, XeroInvoice } from "./schemas";
+import type { XeroAccount, XeroBankTransaction, XeroInvoice } from "./schemas";
+import type { NormalisedBankTransaction } from "./types";
 
 /**
  * Xero → internal model. This file is the anti-corruption boundary (invariant #6): past it,
@@ -95,6 +96,68 @@ export function normaliseInvoice(
     amountPaid: toMoney(invoice.AmountPaid, currency, "AmountPaid"),
     raw: invoice,
   };
+}
+
+/**
+ * Xero's Type is the whole direction signal for a bank transaction, so an unrecognised value
+ * is fatal for that record rather than defaulted. Guessing would flip cash in the forecast —
+ * the same reasoning as `toDirection` for invoices.
+ *
+ * The variants are real: an overpayment, a prepayment and a bank transfer each arrive as a
+ * distinct Type, and all of them move money in a known direction.
+ */
+function toBankDirection(type: string): CommitmentDirection {
+  if (type.startsWith("RECEIVE")) return "INFLOW";
+  if (type.startsWith("SPEND")) return "OUTFLOW";
+  throw new Error(`Unrecognised Xero bank transaction type "${type}"`);
+}
+
+export interface NormaliseBankTransactionOptions {
+  /** Org base currency, used when a transaction omits CurrencyCode. */
+  fallbackCurrency: CurrencyCode;
+}
+
+export function normaliseBankTransaction(
+  transaction: XeroBankTransaction,
+  options: NormaliseBankTransactionOptions,
+): NormalisedBankTransaction {
+  const currency = transaction.CurrencyCode
+    ? parseCurrency(transaction.CurrencyCode)
+    : options.fallbackCurrency;
+
+  return {
+    externalId: transaction.BankTransactionID,
+    provider: "XERO",
+    direction: toBankDirection(transaction.Type),
+    providerType: transaction.Type,
+    status: toStatus(transaction.Status ?? ""),
+    providerStatus: transaction.Status ?? "",
+    reference: transaction.Reference ?? null,
+    // Absent means not reconciled — never assume a match we were not told about.
+    isReconciled: transaction.IsReconciled ?? false,
+    counterpartyName: transaction.Contact?.Name ?? null,
+    counterpartyExternalId: transaction.Contact?.ContactID ?? null,
+    bankAccountExternalId: transaction.BankAccount?.AccountID ?? null,
+    bankAccountName: transaction.BankAccount?.Name ?? null,
+    bankAccountCode: transaction.BankAccount?.Code ?? null,
+    bookedAt: parseXeroDate(transaction.Date, transaction.DateString),
+    currency,
+    subTotal: toMoney(transaction.SubTotal, currency, "SubTotal"),
+    totalTax: toMoney(transaction.TotalTax, currency, "TotalTax"),
+    total: toMoney(transaction.Total, currency, "Total"),
+    raw: transaction,
+  };
+}
+
+export function normaliseBankTransactions(
+  transactions: readonly XeroBankTransaction[],
+  options: NormaliseBankTransactionOptions,
+): NormalisationResult<NormalisedBankTransaction> {
+  return collect(
+    transactions,
+    (transaction) => normaliseBankTransaction(transaction, options),
+    (transaction) => transaction.BankTransactionID,
+  );
 }
 
 export function normaliseAccount(account: XeroAccount): NormalisedLedgerAccount {

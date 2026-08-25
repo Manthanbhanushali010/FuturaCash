@@ -124,3 +124,45 @@ export type XeroOrganisation = z.infer<typeof XeroOrganisation>;
 export const OrganisationsResponse = z
   .object({ Organisations: z.array(XeroOrganisation).default([]) })
   .passthrough();
+
+/**
+ * A bank transaction as Xero records it in the LEDGER — money in or out of a bank account,
+ * entered or reconciled by the bookkeeper. This is NOT a bank feed: the live feed comes from
+ * the Open Banking aggregator, and reconciliation compares the two. See integrations/types.ts.
+ */
+export const XeroBankAccountRef = z
+  .object({
+    AccountID: z.string().optional(),
+    Code: z.string().optional(),
+    Name: z.string().optional(),
+  })
+  .passthrough();
+
+export const XeroBankTransaction = z
+  .object({
+    BankTransactionID: z.string(),
+    /**
+     * RECEIVE* = money in, SPEND* = money out, each with -OVERPAYMENT, -PREPAYMENT and
+     * -TRANSFER variants. This field is the entire direction signal.
+     */
+    Type: z.string(),
+    Status: z.string().optional(),
+    Reference: z.string().optional(),
+    IsReconciled: z.boolean().optional(),
+    Contact: XeroContact.optional(),
+    BankAccount: XeroBankAccountRef.optional(),
+    Date: XeroDate.optional(),
+    DateString: z.string().optional(),
+    CurrencyCode: z.string().optional(),
+    CurrencyRate: z.number().optional(),
+    SubTotal: z.number().optional(),
+    TotalTax: z.number().optional(),
+    Total: z.number().optional(),
+    UpdatedDateUTC: XeroDate.optional(),
+  })
+  .passthrough();
+export type XeroBankTransaction = z.infer<typeof XeroBankTransaction>;
+
+export const BankTransactionsResponse = z
+  .object({ BankTransactions: z.array(XeroBankTransaction).default([]) })
+  .passthrough();

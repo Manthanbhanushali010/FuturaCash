@@ -10,6 +10,22 @@ import { XERO_SCOPES } from "./config";
 const ACCOUNTING_SCOPES = XERO_SCOPES.filter((scope) => scope.startsWith("accounting."));
 
 describe("XERO_SCOPES", () => {
+  it("requests accounting.banktransactions.read for GET /BankTransactions", () => {
+    // Verified against Xero's granular-scopes documentation, not inferred from the endpoint
+    // name. A wrong string here fails at the authorize endpoint with invalid_scope, after a
+    // redirect, with nothing in our own logs to explain it.
+    expect(XERO_SCOPES).toContain("accounting.banktransactions.read");
+  });
+
+  it("does not use the deprecated broad accounting.transactions scope for bank data", () => {
+    // accounting.banktransactions.read is the granular replacement. The broad scope is not
+    // grantable to any app created on or after 2 March 2026, and ours is post-cutoff.
+    for (const scope of XERO_SCOPES) {
+      expect(scope).not.toBe("accounting.transactions");
+      expect(scope).not.toBe("accounting.transactions.read");
+    }
+  });
+
   it("requests no write scope on any accounting resource", () => {
     // Invariant #2. A scope without the .read suffix grants write access.
     for (const scope of ACCOUNTING_SCOPES) {

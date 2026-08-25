@@ -7,12 +7,15 @@ import type {
 } from "../types";
 import {
   XeroNotConnectedError,
+  fetchBankTransactions,
   fetchChartOfAccounts,
   fetchInvoices,
   fetchOrganisation,
   getConnectionState,
 } from "./client";
-import { normaliseAccounts, normaliseInvoices } from "./normalise";
+import { XERO_SCOPES } from "./config";
+import { normaliseAccounts, normaliseBankTransactions, normaliseInvoices } from "./normalise";
+import type { NormalisedBankTransaction } from "./types";
 import type { XeroTenantConnection } from "./tokens";
 
 /**
@@ -57,6 +60,18 @@ export interface XeroOrganisationSummary {
   status: string | null;
 }
 
+/**
+ * Scopes granted when the operator consented, compared against what the code now needs.
+ *
+ * Adding a scope does not upgrade an existing grant: Xero returns 401 `insufficient_scope`
+ * at call time, which surfaces as an opaque API error nowhere near its cause. Detecting it
+ * from the stored grant lets the screen ask for re-authorisation instead.
+ */
+export function missingScopes(grantedScope: string): string[] {
+  const granted = new Set(grantedScope.split(/\s+/).filter(Boolean));
+  return XERO_SCOPES.filter((scope) => !granted.has(scope));
+}
+
 export interface XeroSnapshot {
   tenantId: string;
   tenantName: string;
@@ -64,14 +79,17 @@ export interface XeroSnapshot {
   organisation: XeroOrganisationSummary | null;
   accounts: NormalisationResult<NormalisedLedgerAccount>;
   commitments: NormalisationResult<NormalisedCommitment>;
+  bankTransactions: NormalisationResult<NormalisedBankTransaction>;
+  /** Scopes the code needs that this grant does not have. Non-empty means re-consent. */
+  missingScopes: string[];
   accountsFromCache: boolean;
 }
 
 /**
  * Everything the read-only Xero screen needs, in one call.
  *
- * Three API calls per uncached load (Organisation, Accounts, Invoices) against a 60/min,
- * 5,000/day budget — hence the chart-of-accounts cache.
+ * Four API calls per uncached load (Organisation, Accounts, Invoices, BankTransactions)
+ * against a 60/min, 5,000/day budget — hence the chart-of-accounts cache.
  */
 export async function readXeroSnapshot(): Promise<XeroSnapshot> {
   const state = await getConnectionState();
@@ -86,9 +104,15 @@ export async function readXeroSnapshot(): Promise<XeroSnapshot> {
     ? parseCurrency(organisation.BaseCurrency)
     : DEFAULT_BASE_CURRENCY;
 
-  const [accountsPage, invoices] = await Promise.all([
+  // A grant made before a scope was added cannot read the new endpoint. Skip the call
+  // rather than spending it on a guaranteed 401 and reporting that as a Xero outage.
+  const absent = missingScopes(state.scope);
+  const needsBankScope = absent.includes("accounting.banktransactions.read");
+
+  const [accountsPage, invoices, bankTransactions] = await Promise.all([
     fetchChartOfAccounts(tenantId),
     fetchInvoices(tenantId),
+    needsBankScope ? Promise.resolve([]) : fetchBankTransactions(tenantId),
   ]);
 
   const activeConnection = state.connections.find(
@@ -110,6 +134,10 @@ export async function readXeroSnapshot(): Promise<XeroSnapshot> {
       : null,
     accounts: normaliseAccounts(accountsPage.accounts),
     commitments: normaliseInvoices(invoices, { fallbackCurrency: baseCurrency }),
+    bankTransactions: normaliseBankTransactions(bankTransactions, {
+      fallbackCurrency: baseCurrency,
+    }),
+    missingScopes: absent,
     accountsFromCache: accountsPage.cached,
   };
 }

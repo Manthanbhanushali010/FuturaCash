@@ -11,12 +11,14 @@ import {
 } from "./config";
 import {
   AccountsResponse,
+  BankTransactionsResponse,
   ConnectionsResponse,
   InvoicesResponse,
   OrganisationsResponse,
   TokenErrorResponse,
   TokenResponse,
   type XeroAccount,
+  type XeroBankTransaction,
   type XeroInvoice,
   type XeroOrganisation,
 } from "./schemas";
@@ -338,6 +340,46 @@ export async function fetchInvoices(
   }
 
   return invoices;
+}
+
+export interface FetchBankTransactionsOptions {
+  /** Xero statuses to include. Defaults to AUTHORISED — the ones that really moved money. */
+  statuses?: readonly string[];
+  /** Xero pages at 100. Bounded so one page load cannot burn the daily call budget. */
+  maxPages?: number;
+}
+
+/**
+ * Xero's own record of money through a bank account, from the ledger — not a bank feed.
+ *
+ * Mirrors `fetchInvoices`, with one deliberate difference: `/BankTransactions` has no
+ * `Statuses` shorthand, so the same intent (exclude what did not really happen) is expressed
+ * as a `where` clause. DELETED and VOIDED entries are excluded for the same reason DRAFT
+ * invoices are: they are not movements of cash.
+ */
+export async function fetchBankTransactions(
+  tenantId: string,
+  options: FetchBankTransactionsOptions = {},
+): Promise<XeroBankTransaction[]> {
+  const statuses = options.statuses ?? ["AUTHORISED"];
+  const maxPages = options.maxPages ?? 2;
+  const transactions: XeroBankTransaction[] = [];
+  const where = statuses.map((status) => `Status=="${status}"`).join(" OR ");
+
+  for (let page = 1; page <= maxPages; page += 1) {
+    const body = await xeroGet("/BankTransactions", {
+      tenantId,
+      searchParams: { where, page: String(page), order: "Date DESC" },
+    });
+    const parsed = BankTransactionsResponse.safeParse(body);
+    if (!parsed.success) {
+      throw new XeroApiError(200, "/BankTransactions", `unexpected payload: ${issues(parsed.error)}`);
+    }
+    transactions.push(...parsed.data.BankTransactions);
+    if (parsed.data.BankTransactions.length < 100) break; // short page — no more to fetch
+  }
+
+  return transactions;
 }
 
 // --- helpers ----------------------------------------------------------------

@@ -71,6 +71,13 @@ Update this file after every meaningful implementation change.
   function — the first version of this was verified only by a hand-run curl session, which
   proved the behaviour once but would not notice the matcher being narrowed later. 171 tests.
 
+- **Bank transactions** (2026-08-25, `feature/bank-transactions`). `accounting.banktransactions.read`
+  added; `GET /BankTransactions` fetched with pagination and the tenant header, normalised into
+  `NormalisedBankTransaction`, and shown on `/xero` beside invoices. 221 tests, including a
+  golden-dataset eval for the normaliser. Adding a scope does not upgrade an existing consent,
+  so `readXeroSnapshot` compares the granted scope against `XERO_SCOPES` and the screen asks
+  for re-authorisation instead of spending a call on a guaranteed 401.
+
 ## In Progress
 
 - **Phase B5 — verify, merge, live check.** Blocked on nothing in code; awaiting approval to
@@ -187,6 +194,16 @@ Update this file after every meaningful implementation change.
   not do. Replayed with a cookie jar, the apex path passed state validation and reached token
   exchange. The state TTL was raised from 10 to 15 minutes as the leading real candidate,
   since first-time consent includes sign-in and 2FA.
+- **Xero bank transactions are ledger records, not a bank feed** (2026-08-25) — they are what
+  the bookkeeper entered or reconciled, and the live feed will come from the Open Banking
+  aggregator. Reconciliation is the act of comparing the two, so `NormalisedBankTransaction`
+  is deliberately distinct from `NormalisedTransaction`, which belongs to `BankConnector`.
+  Collapsing them would erase the distinction Spec 2 depends on.
+- **The money boundary rejects extra precision rather than rounding it** (2026-08-25) — a
+  golden case was authored asserting `1.005 -> 101` minor units. The code threw, and the code
+  was right: `toMoney` uses `rounding: "forbid"`, so more than 2dp means our assumption about
+  the payload is wrong. The ground truth was corrected to expect rejection. Naive-conversion
+  hazards belong at the decimal layer (`xero-money.golden.json`), not here.
 - **The access gate fails closed** (2026-08-25) — with `XERO_PAGE_PASSWORD` unset, nothing
   behind the gate is reachable. Forgetting the variable in a deployment locks the page rather
   than silently exposing it, which is the opposite of every security defect found on this

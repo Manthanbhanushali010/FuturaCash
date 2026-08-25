@@ -26,9 +26,16 @@ export const XERO_API_BASE = "https://api.xero.com/api.xro/2.0";
  *   accounting.settings.read  → GET /Organisation, GET /Accounts (chart of accounts)
  *   accounting.invoices.read  → GET /Invoices (sales invoices and bills)
  *   accounting.contacts.read  → the Contact on each invoice (counterparty names)
+ *   accounting.banktransactions.read → GET /BankTransactions
  *
- * Reading Xero's own bank transactions for reconciliation will need
- * `accounting.banktransactions.read` — add it when Spec 2 needs it, not before.
+ * NOTE on bank transactions: these are Xero's record of money in and out of a bank account
+ * as entered or reconciled in the LEDGER. They are not a bank feed. The live feed comes from
+ * the Open Banking aggregator, and reconciliation is precisely the act of comparing the two —
+ * so the two must never be conflated in the model.
+ *
+ * ADDING A SCOPE FORCES RE-CONSENT. An existing grant does not gain it; Xero returns 401
+ * with `insufficient_scope` at call time. The connection screen detects this and asks the
+ * operator to re-authorise rather than surfacing an opaque API error.
  */
 export const XERO_SCOPES = [
   "openid",
@@ -38,6 +45,7 @@ export const XERO_SCOPES = [
   "accounting.settings.read",
   "accounting.invoices.read",
   "accounting.contacts.read",
+  "accounting.banktransactions.read",
 ] as const;
 
 /** Xero: 60 calls/min and 5,000/day per org. Chart of accounts barely changes — cache it. */

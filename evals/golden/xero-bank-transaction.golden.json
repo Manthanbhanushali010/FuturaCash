@@ -1,0 +1,226 @@
+{
+  "note": "Ground truth for integrations/xero/normalise.ts -> normaliseBankTransaction. Payloads are shaped as Xero's /BankTransactions returns them. Expected money is INTEGER MINOR UNITS. The boundary uses rounding:\"forbid\" \u2014 Xero sends 2dp, so anything with more precision means our assumption about the payload is wrong and the record is REJECTED rather than quietly rounded. Naive-conversion hazards (Math.round, toFixed) are covered at the decimal layer by xero-money.golden.json. Do not edit an expected value to make a test pass \u2014 the data is truth, the code moves.",
+  "fallbackCurrency": "GBP",
+  "cases": [
+    {
+      "name": "RECEIVE, plain 2dp \u2014 money in",
+      "payload": {
+        "BankTransactionID": "b1000000-0000-4000-8000-000000000001",
+        "Type": "RECEIVE",
+        "Status": "AUTHORISED",
+        "Reference": "Card takings 12 Aug",
+        "IsReconciled": true,
+        "Contact": {
+          "ContactID": "c-1",
+          "Name": "Square Payments"
+        },
+        "BankAccount": {
+          "AccountID": "a-1",
+          "Code": "090",
+          "Name": "Business Current"
+        },
+        "Date": "/Date(1755000000000+0000)/",
+        "DateString": "2026-08-12T00:00:00",
+        "CurrencyCode": "GBP",
+        "SubTotal": 1240.5,
+        "TotalTax": 248.1,
+        "Total": 1488.6
+      },
+      "expected": {
+        "direction": "INFLOW",
+        "providerType": "RECEIVE",
+        "status": "AUTHORISED",
+        "isReconciled": true,
+        "counterpartyName": "Square Payments",
+        "bankAccountName": "Business Current",
+        "bankAccountCode": "090",
+        "currency": "GBP",
+        "subTotalMinor": 124050,
+        "totalTaxMinor": 24810,
+        "totalMinor": 148860
+      }
+    },
+    {
+      "name": "SPEND \u2014 money out",
+      "payload": {
+        "BankTransactionID": "b1000000-0000-4000-8000-000000000002",
+        "Type": "SPEND",
+        "Status": "AUTHORISED",
+        "Reference": "Matcha wholesale",
+        "IsReconciled": false,
+        "Contact": {
+          "ContactID": "c-2",
+          "Name": "Uji Tea Co"
+        },
+        "BankAccount": {
+          "AccountID": "a-1",
+          "Code": "090",
+          "Name": "Business Current"
+        },
+        "DateString": "2026-08-13T00:00:00",
+        "CurrencyCode": "GBP",
+        "SubTotal": 830.0,
+        "TotalTax": 166.0,
+        "Total": 996.0
+      },
+      "expected": {
+        "direction": "OUTFLOW",
+        "providerType": "SPEND",
+        "status": "AUTHORISED",
+        "isReconciled": false,
+        "counterpartyName": "Uji Tea Co",
+        "currency": "GBP",
+        "subTotalMinor": 83000,
+        "totalTaxMinor": 16600,
+        "totalMinor": 99600
+      }
+    },
+    {
+      "name": "SPEND-TRANSFER \u2014 a transfer out is still money out",
+      "payload": {
+        "BankTransactionID": "b1000000-0000-4000-8000-000000000005",
+        "Type": "SPEND-TRANSFER",
+        "Status": "AUTHORISED",
+        "BankAccount": {
+          "AccountID": "a-1",
+          "Name": "Business Current"
+        },
+        "CurrencyCode": "GBP",
+        "Total": 5000.0
+      },
+      "expected": {
+        "direction": "OUTFLOW",
+        "providerType": "SPEND-TRANSFER",
+        "currency": "GBP",
+        "totalMinor": 500000,
+        "subTotalMinor": 0,
+        "totalTaxMinor": 0
+      }
+    },
+    {
+      "name": "RECEIVE-OVERPAYMENT \u2014 money in",
+      "payload": {
+        "BankTransactionID": "b1000000-0000-4000-8000-000000000006",
+        "Type": "RECEIVE-OVERPAYMENT",
+        "Status": "AUTHORISED",
+        "CurrencyCode": "GBP",
+        "Total": 12.34
+      },
+      "expected": {
+        "direction": "INFLOW",
+        "providerType": "RECEIVE-OVERPAYMENT",
+        "currency": "GBP",
+        "totalMinor": 1234
+      }
+    },
+    {
+      "name": "SPEND-PREPAYMENT \u2014 money out",
+      "payload": {
+        "BankTransactionID": "b1000000-0000-4000-8000-000000000007",
+        "Type": "SPEND-PREPAYMENT",
+        "Status": "AUTHORISED",
+        "CurrencyCode": "GBP",
+        "Total": 0.01
+      },
+      "expected": {
+        "direction": "OUTFLOW",
+        "currency": "GBP",
+        "totalMinor": 1
+      }
+    },
+    {
+      "name": "no CurrencyCode \u2014 falls back to the org base currency",
+      "payload": {
+        "BankTransactionID": "b1000000-0000-4000-8000-000000000008",
+        "Type": "RECEIVE",
+        "Status": "AUTHORISED",
+        "Total": 10.0
+      },
+      "expected": {
+        "direction": "INFLOW",
+        "currency": "GBP",
+        "totalMinor": 1000
+      }
+    },
+    {
+      "name": "EUR \u2014 minor units follow the currency, not the org",
+      "payload": {
+        "BankTransactionID": "b1000000-0000-4000-8000-000000000009",
+        "Type": "SPEND",
+        "Status": "AUTHORISED",
+        "CurrencyCode": "EUR",
+        "Total": 99.99
+      },
+      "expected": {
+        "direction": "OUTFLOW",
+        "currency": "EUR",
+        "totalMinor": 9999
+      }
+    },
+    {
+      "name": "IsReconciled absent \u2014 never assume a match we were not told about",
+      "payload": {
+        "BankTransactionID": "b1000000-0000-4000-8000-00000000000a",
+        "Type": "RECEIVE",
+        "Status": "AUTHORISED",
+        "CurrencyCode": "GBP",
+        "Total": 1.0
+      },
+      "expected": {
+        "direction": "INFLOW",
+        "isReconciled": false,
+        "totalMinor": 100
+      }
+    }
+  ],
+  "rejected": [
+    {
+      "name": "unrecognised Type is fatal for the record \u2014 a guessed direction flips cash",
+      "payload": {
+        "BankTransactionID": "b1000000-0000-4000-8000-0000000000f1",
+        "Type": "TELEPORT",
+        "Status": "AUTHORISED",
+        "CurrencyCode": "GBP",
+        "Total": 5.0
+      },
+      "reasonContains": "Unrecognised Xero bank transaction type"
+    },
+    {
+      "name": "more precision than 2dp means our assumption is wrong \u2014 stop, do not round",
+      "payload": {
+        "BankTransactionID": "b1000000-0000-4000-8000-0000000000f2",
+        "Type": "SPEND",
+        "Status": "AUTHORISED",
+        "CurrencyCode": "GBP",
+        "Total": 1.234
+      },
+      "reasonContains": "Total"
+    },
+    {
+      "name": "value where Math.round(v*100) is wrong \u2014 1.005 \u2014 rejected, not rounded",
+      "payload": {
+        "BankTransactionID": "b1000000-0000-4000-8000-000000000003",
+        "Type": "SPEND",
+        "Status": "AUTHORISED",
+        "CurrencyCode": "GBP",
+        "SubTotal": 1.005,
+        "TotalTax": 0,
+        "Total": 1.005
+      },
+      "reasonContains": "more precision than 2 minor-unit digit"
+    },
+    {
+      "name": "value where toFixed(2) is wrong \u2014 1.045 \u2014 rejected, not rounded",
+      "payload": {
+        "BankTransactionID": "b1000000-0000-4000-8000-000000000004",
+        "Type": "RECEIVE",
+        "Status": "AUTHORISED",
+        "CurrencyCode": "GBP",
+        "SubTotal": 1.045,
+        "TotalTax": 0,
+        "Total": 1.045
+      },
+      "reasonContains": "more precision than 2 minor-unit digit"
+    }
+  ]
+}

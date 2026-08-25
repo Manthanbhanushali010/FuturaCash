@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { normaliseAccount, normaliseInvoice, normaliseInvoices } from "./normalise";
+import {
+  normaliseAccount,
+  normaliseBankTransaction,
+  normaliseBankTransactions,
+  normaliseInvoice,
+  normaliseInvoices,
+} from "./normalise";
 import type { XeroAccount, XeroInvoice } from "./schemas";
 
 /** A Xero-shaped sales invoice, as the Demo Company returns them. */
@@ -154,5 +160,62 @@ describe("normaliseAccount", () => {
     } as XeroAccount);
     expect(result.isBankAccount).toBe(false);
     expect(result.currency).toBeNull();
+  });
+});
+
+describe("normaliseBankTransaction", () => {
+  const options = { fallbackCurrency: "GBP" as const };
+  const base = {
+    BankTransactionID: "bt-1",
+    Type: "RECEIVE",
+    Status: "AUTHORISED",
+    CurrencyCode: "GBP",
+    Total: 10,
+  };
+
+  it("maps every RECEIVE variant to INFLOW", () => {
+    for (const type of ["RECEIVE", "RECEIVE-OVERPAYMENT", "RECEIVE-PREPAYMENT", "RECEIVE-TRANSFER"]) {
+      expect(normaliseBankTransaction({ ...base, Type: type } as never, options).direction).toBe("INFLOW");
+    }
+  });
+
+  it("maps every SPEND variant to OUTFLOW", () => {
+    for (const type of ["SPEND", "SPEND-OVERPAYMENT", "SPEND-PREPAYMENT", "SPEND-TRANSFER"]) {
+      expect(normaliseBankTransaction({ ...base, Type: type } as never, options).direction).toBe("OUTFLOW");
+    }
+  });
+
+  it("throws on an unrecognised type rather than guessing a direction", () => {
+    // A guessed direction flips cash in the forecast — the same reasoning as invoices.
+    expect(() => normaliseBankTransaction({ ...base, Type: "MYSTERY" } as never, options)).toThrow(
+      /Unrecognised Xero bank transaction type/,
+    );
+  });
+
+  it("keeps the provider type verbatim so an unusual variant stays diagnosable", () => {
+    const out = normaliseBankTransaction({ ...base, Type: "SPEND-TRANSFER" } as never, options);
+    expect(out.providerType).toBe("SPEND-TRANSFER");
+  });
+
+  it("treats a missing IsReconciled as not reconciled", () => {
+    expect(normaliseBankTransaction(base as never, options).isReconciled).toBe(false);
+  });
+
+  it("does not lift the bank account number into the model — it is PII with no forecasting use", () => {
+    const out = normaliseBankTransaction(
+      { ...base, BankAccount: { AccountID: "a", Name: "Current", BankAccountNumber: "12345678" } } as never,
+      options,
+    );
+    expect(JSON.stringify({ ...out, raw: null })).not.toContain("12345678");
+  });
+
+  it("collects failures instead of dropping or throwing for the batch", () => {
+    const result = normaliseBankTransactions(
+      [base, { ...base, BankTransactionID: "bt-2", Type: "NONSENSE" }] as never,
+      options,
+    );
+    expect(result.items).toHaveLength(1);
+    expect(result.failures).toHaveLength(1);
+    expect(result.failures[0]?.externalId).toBe("bt-2");
   });
 });

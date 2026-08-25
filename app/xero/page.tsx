@@ -133,9 +133,10 @@ function ConnectLink({ label = "Connect to Xero" }: { label?: string }) {
 }
 
 function Snapshot({ snapshot }: { snapshot: XeroSnapshot }) {
-  const { organisation, accounts, commitments } = snapshot;
+  const { organisation, accounts, commitments, bankTransactions } = snapshot;
   const outstanding = outstandingByDirection(commitments.items);
-  const failures = [...accounts.failures, ...commitments.failures];
+  const failures = [...accounts.failures, ...commitments.failures, ...bankTransactions.failures];
+  const needsBankScope = snapshot.missingScopes.includes("accounting.banktransactions.read");
 
   return (
     <>
@@ -158,6 +159,10 @@ function Snapshot({ snapshot }: { snapshot: XeroSnapshot }) {
       >
         <dl className="grid grid-cols-2 gap-px bg-border sm:grid-cols-4">
           <Stat label="Invoices read" value={String(commitments.items.length)} />
+          <Stat
+            label="Bank transactions"
+            value={needsBankScope ? "—" : String(bankTransactions.items.length)}
+          />
           <Stat label="Accounts read" value={String(accounts.items.length)} />
           <Stat
             label="Receivable outstanding"
@@ -228,6 +233,60 @@ function Snapshot({ snapshot }: { snapshot: XeroSnapshot }) {
           </p>
         ) : null}
       </Card>
+
+      {needsBankScope ? (
+        <Notice tone="info" title="Re-authorise to include bank transactions">
+          <p>
+            This connection was authorised before <code>accounting.banktransactions.read</code>{" "}
+            was requested. Xero does not add a scope to an existing consent, so the bank
+            transaction list stays empty until you disconnect and connect again.
+          </p>
+          <div className="mt-4">
+            <ConnectLink label="Re-authorise" />
+          </div>
+        </Notice>
+      ) : (
+        <Card
+          title="Bank transactions"
+          subtitle="Xero's ledger record of money through the bank — not a live bank feed. RECEIVE = in · SPEND = out."
+        >
+          {bankTransactions.items.length === 0 ? (
+            <Empty>No bank transactions returned for the selected statuses.</Empty>
+          ) : (
+            <Table head={["Date", "Reference", "Counterparty", "Direction", "Account", "Tax", "Total"]}>
+              {bankTransactions.items.slice(0, 50).map((entry) => (
+                <Row key={entry.externalId}>
+                  <Cell muted>
+                    <span className="figure">{formatDay(entry.bookedAt)}</span>
+                  </Cell>
+                  <Cell>
+                    {entry.reference ?? "—"}
+                    {entry.isReconciled ? (
+                      <span className="ml-2">
+                        <Pill label="reconciled" />
+                      </span>
+                    ) : null}
+                  </Cell>
+                  <Cell>{entry.counterpartyName ?? "—"}</Cell>
+                  <Cell muted>{entry.direction === "INFLOW" ? "In" : "Out"}</Cell>
+                  <Cell muted>{entry.bankAccountName ?? "—"}</Cell>
+                  <Cell align="right">
+                    <Figure value={entry.totalTax} muted />
+                  </Cell>
+                  <Cell align="right">
+                    <Figure value={entry.total} />
+                  </Cell>
+                </Row>
+              ))}
+            </Table>
+          )}
+          {bankTransactions.items.length > 50 ? (
+            <p className="px-5 py-3 text-xs text-muted">
+              Showing the first 50 of {bankTransactions.items.length}.
+            </p>
+          ) : null}
+        </Card>
+      )}
 
       <Card title="Chart of accounts" subtitle="Cached for 15 minutes — Xero allows 5,000 calls/day per org.">
         {accounts.items.length === 0 ? (

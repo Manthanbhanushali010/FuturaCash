@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   XeroRateLimitError,
   clearChartOfAccountsCache,
+  fetchBankTransactions,
   fetchChartOfAccounts,
   fetchInvoices,
   getValidAccessToken,
@@ -119,6 +120,25 @@ const INVOICES_PAYLOAD = {
   ],
 };
 
+const BANK_TRANSACTIONS_PAYLOAD = {
+  BankTransactions: [
+    {
+      BankTransactionID: "bt-0000-0001",
+      Type: "RECEIVE",
+      Status: "AUTHORISED",
+      Reference: "Card takings",
+      IsReconciled: true,
+      Contact: { ContactID: "c-9", Name: "Square Payments" },
+      BankAccount: { AccountID: "a-1", Code: "090", Name: "Business Current" },
+      DateString: "2026-08-12T00:00:00",
+      CurrencyCode: "GBP",
+      SubTotal: 1240.5,
+      TotalTax: 248.1,
+      Total: 1488.6,
+    },
+  ],
+};
+
 interface Call {
   url: string;
   headers: Record<string, string>;
@@ -148,6 +168,7 @@ function defaultHandler(url: string) {
   if (url.includes("/Organisation")) return { body: ORGANISATION_PAYLOAD };
   if (url.includes("/Accounts")) return { body: ACCOUNTS_PAYLOAD };
   if (url.includes("/Invoices")) return { body: INVOICES_PAYLOAD };
+  if (url.includes("/BankTransactions")) return { body: BANK_TRANSACTIONS_PAYLOAD };
   if (url.includes("identity.xero.com/connect/token")) {
     return { body: { access_token: "access-rotated", refresh_token: "refresh-rotated", expires_in: 1800, token_type: "Bearer", scope: "x" } };
   }
@@ -302,5 +323,53 @@ describe("token refresh", () => {
     stubFetch(defaultHandler);
     await getValidAccessToken();
     expect(calls.filter((call) => call.url.includes("connect/token"))).toHaveLength(0);
+  });
+});
+
+describe("fetchBankTransactions", () => {
+  it("sends the tenant header and bearer token", async () => {
+    stubFetch(defaultHandler);
+    await fetchBankTransactions(TENANT);
+    const call = calls.find((c) => c.url.includes("/BankTransactions"));
+    expect(call).toBeDefined();
+    expect(call?.headers["Xero-Tenant-Id"]).toBe(TENANT);
+    expect(call?.headers["Authorization"]).toMatch(/^Bearer /);
+  });
+
+  it("filters to AUTHORISED with a where clause, not a Statuses parameter", async () => {
+    // /BankTransactions has no Statuses shorthand — that is an /Invoices affordance.
+    stubFetch(defaultHandler);
+    await fetchBankTransactions(TENANT);
+    const url = calls.find((c) => c.url.includes("/BankTransactions"))!.url;
+    expect(decodeURIComponent(url)).toContain('Status=="AUTHORISED"');
+    expect(url).not.toContain("Statuses=");
+  });
+
+  it("stops after a short page rather than paging forever", async () => {
+    stubFetch(defaultHandler);
+    await fetchBankTransactions(TENANT);
+    // One row came back, which is fewer than Xero's page size, so there is nothing more.
+    expect(calls.filter((c) => c.url.includes("/BankTransactions"))).toHaveLength(1);
+  });
+
+  it("pages while a full page comes back, bounded by maxPages", async () => {
+    const full = { BankTransactions: Array.from({ length: 100 }, (_, i) => ({
+      BankTransactionID: `bt-${i}`, Type: "SPEND", Status: "AUTHORISED", CurrencyCode: "GBP", Total: 1,
+    })) };
+    stubFetch((url) => (url.includes("/BankTransactions") ? { body: full } : defaultHandler(url)));
+
+    const rows = await fetchBankTransactions(TENANT, { maxPages: 3 });
+    const pages = calls.filter((c) => c.url.includes("/BankTransactions"));
+    expect(pages).toHaveLength(3);
+    expect(rows).toHaveLength(300);
+    // The bound exists so one page load cannot burn the 5,000/day budget.
+    expect(pages.map((c) => new URL(c.url).searchParams.get("page"))).toEqual(["1", "2", "3"]);
+  });
+
+  it("rejects a payload that is not shaped like Xero's", async () => {
+    stubFetch((url) =>
+      url.includes("/BankTransactions") ? { body: { BankTransactions: [{ nope: true }] } } : defaultHandler(url),
+    );
+    await expect(fetchBankTransactions(TENANT)).rejects.toThrow(/unexpected payload/);
   });
 });
