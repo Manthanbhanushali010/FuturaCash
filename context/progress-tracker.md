@@ -56,10 +56,19 @@ Update this file after every meaningful implementation change.
   `pg_advisory_xact_lock`. `client.ts` changed only to call it and to re-read under the lock.
   131 tests green (was 96).
 
+- **Phase B2 — persistence proven** (2026-08-25). Connected locally against Neon, restarted
+  the dev server twice, and `/xero` stayed connected without re-authorising. Also verified
+  mechanically: write, read-back, ciphertext at rest, survival across a fresh store instance,
+  and clear. One bug found on the way — `ProviderTokenGrant` was migrated but
+  `prisma generate` was never re-run, so the generated client had no delegate and the store
+  threw on first real use. Every unit test passed throughout, because they inject a fake
+  client that had the delegate the real one lacked.
+- **Phase B3 — interim access gate** (2026-08-25). `middleware.ts` gates `/xero` and
+  `/api/xero/*` behind a shared password. 153 tests.
+
 ## In Progress
 
-- **Phase B2 — prove persistence end to end.** Connect locally against Neon, restart the
-  dev server, confirm `/xero` is still connected without re-authorising.
+- **Phase B4 — Vercel environment variables**, then B5 (verify, merge, live check).
 
 ## Next Up
 
@@ -157,6 +166,18 @@ Update this file after every meaningful implementation change.
   asserting that *without* the lock the two connections do interleave; without that control,
   the lock test could pass vacuously. Assert mutual exclusion, not ordering — which of two
   network round-trips wins is not deterministic.
+- **The access gate fails closed** (2026-08-25) — with `XERO_PAGE_PASSWORD` unset, nothing
+  behind the gate is reachable. Forgetting the variable in a deployment locks the page rather
+  than silently exposing it, which is the opposite of every security defect found on this
+  project so far. It runs in middleware rather than as a conditional render: hiding the
+  Connect button would leave `/xero` still rendering invoices and `/api/xero/connect` still
+  reachable by URL. The cookie holds a digest, not the password, so presenting the raw secret
+  as a cookie value does not work — asserted in the tests.
+- **Hermetic tests cannot catch a stale generated client** (2026-08-25) — the fake Prisma
+  client had a delegate the real one lacked, so 131 tests passed against code that threw on
+  first contact with a database. Fixed with `postinstall: prisma generate` and a test that
+  asserts against the REAL generated client. The same shape as the BYPASSRLS miss: the
+  structural check looked perfect and only touching the real thing revealed it.
 - **`@prisma/client` loads `.env` at import** (2026-08-21) — so unsetting a variable in the
   shell does not hide it from tests. The integration test's skip depends on `.env` being
   absent, which is true in CI and false locally. Verified by moving `.env` aside: 125 pass,
