@@ -64,7 +64,12 @@ Update this file after every meaningful implementation change.
   threw on first real use. Every unit test passed throughout, because they inject a fake
   client that had the delegate the real one lacked.
 - **Phase B3 — interim access gate** (2026-08-25). `middleware.ts` gates `/xero` and
-  `/api/xero/*` behind a shared password. 153 tests.
+  `/api/xero/*` behind a shared password held in `XERO_PAGE_PASSWORD`. Programmatic requests
+  to the routes get `401` with no data; browser navigations get the password prompt, because
+  `/api/xero/connect` is where the landing page's "Get started" points and `/api/xero/callback`
+  is where Xero returns. Covered by `middleware.test.ts`, which exercises the real middleware
+  function — the first version of this was verified only by a hand-run curl session, which
+  proved the behaviour once but would not notice the matcher being narrowed later. 171 tests.
 
 ## In Progress
 
