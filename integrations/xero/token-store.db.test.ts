@@ -234,3 +234,23 @@ describe("advisoryLockKey", () => {
     expect(key).toBeLessThan(2n ** 63n);
   });
 });
+
+/**
+ * Regression guard for a bug the tests above structurally cannot catch.
+ *
+ * `ProviderTokenGrant` was added to schema.prisma and migrated, but `prisma generate` was
+ * not re-run, so the generated client had no `providerTokenGrant` delegate. Every test in
+ * this file passed — they inject a fake client — while the real store threw
+ * "Cannot read properties of undefined (reading 'findFirst')" on first use.
+ *
+ * This asserts against the REAL generated client. It opens no connection.
+ */
+describe("generated Prisma client", () => {
+  it("exposes every model DbXeroTokenStore depends on", async () => {
+    const { PrismaClient } = await import("@prisma/client");
+    const client = new PrismaClient() as unknown as Record<string, unknown>;
+    for (const model of ["providerTokenGrant", "tenant"]) {
+      expect(client[model], `missing delegate "${model}" — run \`prisma generate\``).toBeDefined();
+    }
+  });
+});
