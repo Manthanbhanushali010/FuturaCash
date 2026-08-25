@@ -73,7 +73,10 @@ Update this file after every meaningful implementation change.
 
 ## In Progress
 
-- **Phase B4 — Vercel environment variables**, then B5 (verify, merge, live check).
+- **Phase B5 — verify, merge, live check.** Blocked on nothing in code; awaiting approval to
+  merge 9 commits to `main`, plus two config changes that only the operator can make:
+  `XERO_REDIRECT_URI` → `https://www.futuracash.co.uk/api/xero/callback` in Vercel, and the
+  same string registered in the Xero app.
 
 ## Next Up
 
@@ -171,6 +174,19 @@ Update this file after every meaningful implementation change.
   asserting that *without* the lock the two connections do interleave; without that control,
   the lock test could pass vacuously. Assert mutual exclusion, not ordering — which of two
   network round-trips wins is not deterministic.
+- **Production ran a build that predated the work being debugged** (2026-08-25) — a live
+  "State mismatch" on the Xero connect was investigated as an interaction between the new
+  access gate and the OAuth state cookie. `/unlock` returned 404: none of B1–B3 was deployed.
+  B4 added environment variables to the 6 August landing-page build, which enabled the OAuth
+  flow for the first time while lacking the persistence layer entirely — its `FileXeroTokenStore`
+  writes to `process.cwd()`, read-only on Vercel. **Check what is actually deployed before
+  attributing a production symptom to undeployed code.**
+- **A faithful reproduction beats a plausible mechanism** (2026-08-25) — the apex/www
+  inconsistency looked like an obvious cause, and two curl runs appeared to confirm it. Both
+  were artefacts: `-H "Cookie:"` is dropped across a cross-host redirect, which a browser does
+  not do. Replayed with a cookie jar, the apex path passed state validation and reached token
+  exchange. The state TTL was raised from 10 to 15 minutes as the leading real candidate,
+  since first-time consent includes sign-in and 2FA.
 - **The access gate fails closed** (2026-08-25) — with `XERO_PAGE_PASSWORD` unset, nothing
   behind the gate is reachable. Forgetting the variable in a deployment locks the page rather
   than silently exposing it, which is the opposite of every security defect found on this

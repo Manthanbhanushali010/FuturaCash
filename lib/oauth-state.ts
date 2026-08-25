@@ -10,7 +10,16 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
  */
 
 export const OAUTH_STATE_COOKIE = "xero_oauth_state";
-const STATE_TTL_SECONDS = 10 * 60;
+/**
+ * 15 minutes, not 10.
+ *
+ * The window has to cover the entire Xero consent journey, which on a first connection is
+ * sign-in, often 2FA, and then choosing an organisation. When the cookie expires mid-flow the
+ * callback reports "State mismatch — the sign-in did not start here", which reads like a CSRF
+ * attack rather than a timeout and sends you looking in the wrong place. Long enough to be
+ * usable, short enough that a stolen state value is worthless by the time it is found.
+ */
+const STATE_TTL_SECONDS = 15 * 60;
 
 export function createOAuthState(): string {
   return randomBytes(32).toString("base64url");
