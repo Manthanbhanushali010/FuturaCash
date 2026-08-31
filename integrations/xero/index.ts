@@ -52,6 +52,24 @@ export function createXeroConnector(
   };
 }
 
+/**
+ * What the connection screen should say, given a stored grant.
+ *
+ * The distinction that matters is between "several organisations, pick one" and "no
+ * organisation at all". They both leave `activeTenantId` null, and treating them the same
+ * renders a chooser with nothing to choose — a dead end with no explanation, which is exactly
+ * what a real customer hits when they disconnect the app from inside Xero.
+ */
+export type ConnectionPrompt = "ready" | "choose-organisation" | "disconnected-in-xero";
+
+export function connectionPrompt(state: {
+  activeTenantId: string | null;
+  connections: readonly unknown[];
+}): ConnectionPrompt {
+  if (state.activeTenantId) return "ready";
+  return state.connections.length === 0 ? "disconnected-in-xero" : "choose-organisation";
+}
+
 export interface XeroOrganisationSummary {
   name: string;
   legalName: string | null;

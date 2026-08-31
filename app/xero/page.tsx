@@ -3,6 +3,7 @@ import { outstandingByDirection } from "@/core/position";
 import {
   XeroNotConnectedError,
   getConnectionState,
+  connectionPrompt,
   isXeroConfigured,
   readXeroSnapshot,
   type XeroSnapshot,
@@ -63,6 +64,22 @@ async function Body() {
           Read-only scopes only — this app never writes to Xero.
         </p>
         <ConnectLink />
+      </Notice>
+    );
+  }
+
+  if (connectionPrompt(state) === "disconnected-in-xero") {
+    // Xero reported zero authorised organisations on the last refresh. Rendering the chooser
+    // here would show an empty list with no explanation.
+    return (
+      <Notice tone="info" title="No organisation is connected any more">
+        <p className="mb-4">
+          Xero reports no authorised organisation for this connection. That happens when the
+          app is disconnected from inside Xero (Settings → Connected Apps), or when a Demo
+          Company reaches its 28-day reset. Nothing is wrong with your data here — the
+          authorisation on Xero&apos;s side has ended.
+        </p>
+        <ConnectLink label="Re-authorise" />
       </Notice>
     );
   }

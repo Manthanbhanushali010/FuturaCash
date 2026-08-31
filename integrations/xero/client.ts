@@ -165,6 +165,12 @@ export function toTokenState(
       ? previous.activeTenantId
       : null;
 
+  // NOTE when `connections` is empty. That means Xero no longer reports any authorised
+  // organisation — the app was disconnected from Xero's side, or a Demo Company hit its
+  // 28-day reset. We still persist: the refresh token has already rotated, so discarding this
+  // result would throw away the only working credential and kill the connection outright.
+  // The empty state is therefore recorded faithfully, and `connectionPrompt` in ./index.ts
+  // turns it into an explanation rather than a screen with nothing on it.
   return {
     accessToken: tokens.access_token,
     refreshToken: tokens.refresh_token,
