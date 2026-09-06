@@ -20,6 +20,16 @@ import { Card, Cell, Empty, Figure, Notice, Pill, Row, Table, formatDay } from "
 
 export const dynamic = "force-dynamic";
 
+/**
+ * Rows rendered per table.
+ *
+ * Not a fetch limit — `maxPages` in integrations/xero/client.ts bounds that, and currently
+ * allows 200 of each. This caps what reaches the DOM, so raising it costs no extra Xero API
+ * calls. Used by both the slice and the "showing the first N" message: two literals would
+ * eventually disagree and the page would quietly lie about how much it is displaying.
+ */
+const MAX_ROWS = 200;
+
 export default async function XeroPage({
   searchParams,
 }: {
@@ -218,7 +228,7 @@ function Snapshot({ snapshot }: { snapshot: XeroSnapshot }) {
           <Empty>No invoices returned for the selected statuses.</Empty>
         ) : (
           <Table head={["Document", "Counterparty", "Direction", "Status", "Due", "Total", "Outstanding"]}>
-            {commitments.items.slice(0, 50).map((commitment) => (
+            {commitments.items.slice(0, MAX_ROWS).map((commitment) => (
               <Row key={commitment.externalId}>
                 <Cell>
                   <span className="figure">{commitment.documentNumber ?? "—"}</span>
@@ -244,9 +254,9 @@ function Snapshot({ snapshot }: { snapshot: XeroSnapshot }) {
             ))}
           </Table>
         )}
-        {commitments.items.length > 50 ? (
+        {commitments.items.length > MAX_ROWS ? (
           <p className="px-5 py-3 text-xs text-muted">
-            Showing the first 50 of {commitments.items.length}.
+            Showing the first {MAX_ROWS} of {commitments.items.length}.
           </p>
         ) : null}
       </Card>
@@ -271,7 +281,7 @@ function Snapshot({ snapshot }: { snapshot: XeroSnapshot }) {
             <Empty>No bank transactions returned for the selected statuses.</Empty>
           ) : (
             <Table head={["Date", "Reference", "Counterparty", "Direction", "Account", "Tax", "Total"]}>
-              {bankTransactions.items.slice(0, 50).map((entry) => (
+              {bankTransactions.items.slice(0, MAX_ROWS).map((entry) => (
                 <Row key={entry.externalId}>
                   <Cell muted>
                     <span className="figure">{formatDay(entry.bookedAt)}</span>
@@ -297,9 +307,9 @@ function Snapshot({ snapshot }: { snapshot: XeroSnapshot }) {
               ))}
             </Table>
           )}
-          {bankTransactions.items.length > 50 ? (
+          {bankTransactions.items.length > MAX_ROWS ? (
             <p className="px-5 py-3 text-xs text-muted">
-              Showing the first 50 of {bankTransactions.items.length}.
+              Showing the first {MAX_ROWS} of {bankTransactions.items.length}.
             </p>
           ) : null}
         </Card>
