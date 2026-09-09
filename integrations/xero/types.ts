@@ -32,6 +32,14 @@ export interface NormalisedBankTransaction {
   providerStatus: string;
   reference: string | null;
   /**
+   * The transaction narrative, taken from the first line item that has one.
+   *
+   * Distinct from `reference`: Xero populates them independently, and on real data the
+   * description is far more likely to be present. Kept as its own field rather than folded
+   * into `reference` so the display can prefer one without losing the other.
+   */
+  description: string | null;
+  /**
    * Whether Xero considers this matched against the bank statement. The single most useful
    * field for Spec 2: an unreconciled ledger entry is a candidate for a duplicate or a
    * timing difference against the real feed.

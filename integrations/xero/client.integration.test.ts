@@ -373,3 +373,28 @@ describe("fetchBankTransactions", () => {
     await expect(fetchBankTransactions(TENANT)).rejects.toThrow(/unexpected payload/);
   });
 });
+
+describe("fetchInvoices ordering", () => {
+  it("requests the MOST RECENT invoices, not the oldest", async () => {
+    // Ascending order returned JENKI's oldest 200 -- due 2020-11 to 2021-09, all PAID -- so
+    // the screen showed five-year-old history as the current position and both outstanding
+    // totals rendered blank. A bounded read must start from the end that matters.
+    stubFetch(defaultHandler);
+    await fetchInvoices(TENANT);
+    const url = calls.find((c) => c.url.includes("/Invoices"))!.url;
+    // Parse the param: URLSearchParams encodes the space as "+", which decodeURIComponent
+    // leaves alone, so a naive string match on "DueDate DESC" never matches.
+    expect(new URL(url).searchParams.get("order")).toBe("DueDate DESC");
+  });
+
+  it("orders invoices the same way as bank transactions", async () => {
+    // Both are bounded reads over an unbounded history; they must agree on which end to take.
+    stubFetch(defaultHandler);
+    await fetchInvoices(TENANT);
+    await fetchBankTransactions(TENANT);
+    const inv = new URL(calls.find((c) => c.url.includes("/Invoices"))!.url);
+    const bank = new URL(calls.find((c) => c.url.includes("/BankTransactions"))!.url);
+    expect(inv.searchParams.get("order")).toContain("DESC");
+    expect(bank.searchParams.get("order")).toContain("DESC");
+  });
+});

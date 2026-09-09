@@ -133,6 +133,7 @@ export function normaliseBankTransaction(
     status: toStatus(transaction.Status ?? ""),
     providerStatus: transaction.Status ?? "",
     reference: transaction.Reference ?? null,
+    description: firstDescription(transaction),
     // Absent means not reconciled — never assume a match we were not told about.
     isReconciled: transaction.IsReconciled ?? false,
     counterpartyName: transaction.Contact?.Name ?? null,
@@ -147,6 +148,22 @@ export function normaliseBankTransaction(
     total: toMoney(transaction.Total, currency, "Total"),
     raw: transaction,
   };
+}
+
+/**
+ * The first line item carrying a description.
+ *
+ * Bank transactions are usually single-line, so "first" is almost always "the only one".
+ * Where there are several, joining them would produce a long unreadable cell and lose the
+ * per-line amounts that give them meaning; showing the first matches what Xero's own bank
+ * view leads with. Whitespace-only descriptions count as absent.
+ */
+function firstDescription(transaction: XeroBankTransaction): string | null {
+  for (const line of transaction.LineItems ?? []) {
+    const text = line.Description?.trim();
+    if (text) return text;
+  }
+  return null;
 }
 
 export function normaliseBankTransactions(

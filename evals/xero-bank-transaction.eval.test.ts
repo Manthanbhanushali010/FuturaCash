@@ -24,6 +24,8 @@ interface Expected {
   bankAccountName?: string;
   bankAccountCode?: string;
   currency?: string;
+  reference?: string | null;
+  description?: string | null;
   subTotalMinor?: number;
   totalTaxMinor?: number;
   totalMinor?: number;
@@ -61,9 +63,22 @@ describe("eval: Xero bank transaction normalisation", () => {
     if (expected.bankAccountName !== undefined) expect(actual.bankAccountName).toBe(expected.bankAccountName);
     if (expected.bankAccountCode !== undefined) expect(actual.bankAccountCode).toBe(expected.bankAccountCode);
     if (expected.currency !== undefined) expect(actual.total.currency).toBe(expected.currency);
+    if (expected.reference !== undefined) expect(actual.reference).toBe(expected.reference);
+    if (expected.description !== undefined) expect(actual.description).toBe(expected.description);
     if (expected.subTotalMinor !== undefined) expect(actual.subTotal.minor).toBe(expected.subTotalMinor);
     if (expected.totalTaxMinor !== undefined) expect(actual.totalTax.minor).toBe(expected.totalTaxMinor);
     if (expected.totalMinor !== undefined) expect(actual.total.minor).toBe(expected.totalMinor);
+  });
+
+  it("takes the description from LineItems, which Reference often lacks", () => {
+    // On JENKI's real data, LineItems[].Description is populated on 200/200 rows while
+    // Reference is present on 86. Reading only Reference showed a blank on 114 of them.
+    const withDescription = cases.filter((c) => c.expected.description);
+    expect(withDescription.length).toBeGreaterThanOrEqual(2);
+    for (const testCase of withDescription) {
+      const actual = normaliseBankTransaction(testCase.payload as unknown as XeroBankTransaction, options);
+      expect(actual.description).toBe(testCase.expected.description);
+    }
   });
 
   it("every money value is an integer — never a float", () => {

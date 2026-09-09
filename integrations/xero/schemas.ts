@@ -138,6 +138,20 @@ export const XeroBankAccountRef = z
   })
   .passthrough();
 
+/**
+ * A line on a bank transaction. Xero's own Bank Accounts view shows `Description` as the
+ * transaction narrative, and for JENKI it is populated on every row while `Reference` is
+ * present on fewer than half — so a screen that reads only `Reference` shows blanks for
+ * transactions Xero describes perfectly well.
+ */
+export const XeroBankTransactionLineItem = z
+  .object({
+    Description: z.string().optional(),
+    AccountCode: z.string().optional(),
+    LineAmount: z.number().optional(),
+  })
+  .passthrough();
+
 export const XeroBankTransaction = z
   .object({
     BankTransactionID: z.string(),
@@ -158,6 +172,7 @@ export const XeroBankTransaction = z
     SubTotal: z.number().optional(),
     TotalTax: z.number().optional(),
     Total: z.number().optional(),
+    LineItems: z.array(XeroBankTransactionLineItem).optional(),
     UpdatedDateUTC: XeroDate.optional(),
   })
   .passthrough();

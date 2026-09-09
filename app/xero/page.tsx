@@ -280,14 +280,16 @@ function Snapshot({ snapshot }: { snapshot: XeroSnapshot }) {
           {bankTransactions.items.length === 0 ? (
             <Empty>No bank transactions returned for the selected statuses.</Empty>
           ) : (
-            <Table head={["Date", "Reference", "Counterparty", "Direction", "Account", "Tax", "Total"]}>
+            <Table head={["Date", "Description", "Counterparty", "Direction", "Account", "Tax", "Total"]}>
               {bankTransactions.items.slice(0, MAX_ROWS).map((entry) => (
                 <Row key={entry.externalId}>
                   <Cell muted>
                     <span className="figure">{formatDay(entry.bookedAt)}</span>
                   </Cell>
                   <Cell>
-                    {entry.reference ?? "—"}
+                    {/* Reference first when present, description otherwise: Xero populates
+                        them independently and description is the more reliable of the two. */}
+                    {entry.reference ?? entry.description ?? "—"}
                     {entry.isReconciled ? (
                       <span className="ml-2">
                         <Pill label="reconciled" />

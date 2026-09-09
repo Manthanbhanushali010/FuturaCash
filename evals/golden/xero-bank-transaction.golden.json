@@ -171,6 +171,74 @@
         "isReconciled": false,
         "totalMinor": 100
       }
+    },
+    {
+      "name": "no Reference, but a LineItems description \u2014 the JENKI case",
+      "payload": {
+        "BankTransactionID": "b1000000-0000-4000-8000-00000000000b",
+        "Type": "SPEND",
+        "Status": "AUTHORISED",
+        "CurrencyCode": "GBP",
+        "Total": 42.5,
+        "LineItems": [
+          {
+            "Description": "HSBC FASTER PAYMENT REF 88213",
+            "AccountCode": "404",
+            "LineAmount": 42.5
+          }
+        ]
+      },
+      "expected": {
+        "direction": "OUTFLOW",
+        "currency": "GBP",
+        "totalMinor": 4250,
+        "reference": null,
+        "description": "HSBC FASTER PAYMENT REF 88213"
+      }
+    },
+    {
+      "name": "several line items \u2014 the first with a description wins",
+      "payload": {
+        "BankTransactionID": "b1000000-0000-4000-8000-00000000000c",
+        "Type": "RECEIVE",
+        "Status": "AUTHORISED",
+        "CurrencyCode": "GBP",
+        "Total": 10.0,
+        "LineItems": [
+          {
+            "Description": "   ",
+            "LineAmount": 0
+          },
+          {
+            "Description": "Card settlement 14 Aug",
+            "LineAmount": 10.0
+          },
+          {
+            "Description": "ignored",
+            "LineAmount": 0
+          }
+        ]
+      },
+      "expected": {
+        "direction": "INFLOW",
+        "totalMinor": 1000,
+        "description": "Card settlement 14 Aug"
+      }
+    },
+    {
+      "name": "no LineItems at all \u2014 description is null, not an empty string",
+      "payload": {
+        "BankTransactionID": "b1000000-0000-4000-8000-00000000000d",
+        "Type": "SPEND",
+        "Status": "AUTHORISED",
+        "CurrencyCode": "GBP",
+        "Total": 1.0
+      },
+      "expected": {
+        "direction": "OUTFLOW",
+        "totalMinor": 100,
+        "description": null
+      }
     }
   ],
   "rejected": [

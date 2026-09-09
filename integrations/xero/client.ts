@@ -334,7 +334,14 @@ export async function fetchInvoices(
       searchParams: {
         Statuses: statuses.join(","),
         page: String(page),
-        order: "DueDate",
+        // DESC, so a bounded read returns the MOST RECENT invoices.
+        //
+        // This was ascending, which on an org with years of history returned the oldest 200 —
+        // for JENKI, invoices due between 2020-11 and 2021-09, every one of them long since
+        // PAID. The screen showed five-year-old history as if it were the current position,
+        // and both outstanding totals rendered blank because nothing in the page was still
+        // owed. Bank transactions already ordered Date DESC; invoices were the odd one out.
+        order: "DueDate DESC",
       },
     });
     const parsed = InvoicesResponse.safeParse(body);

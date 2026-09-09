@@ -204,6 +204,24 @@ Update this file after every meaningful implementation change.
   was right: `toMoney` uses `rounding: "forbid"`, so more than 2dp means our assumption about
   the payload is wrong. The ground truth was corrected to expect rejection. Naive-conversion
   hazards belong at the decimal layer (`xero-money.golden.json`), not here.
+- **A bounded read must start from the end that matters** (2026-09-10) — `fetchInvoices`
+  ordered by `DueDate` ascending, so on an org with history it returned the OLDEST 200. For
+  JENKI those were due between 2020-11 and 2021-09 and every one was PAID, so the screen
+  showed five-year-old history as the current position and both outstanding totals rendered
+  blank. `outstandingByDirection` was correct throughout — it was given nothing to count.
+  The Demo Company hid this completely: 85 invoices fit in one page, so order never mattered.
+  **A limit that is invisible on test data is a defect waiting for a real customer.**
+- **Read the field the provider actually populates** (2026-09-10) — the bank transaction
+  table displayed `Reference`, which JENKI populates on 86 of 200 rows, while
+  `LineItems[].Description` — what Xero's own Bank Accounts view shows — is populated on
+  200 of 200. 114 rows displayed a blank for transactions Xero described perfectly well.
+  Surveying real field presence before choosing which field to display would have caught it.
+- **Local cannot refresh a production grant, by construction** (2026-09-10) — the two
+  environments use different Xero apps, so a local refresh of a production-issued token fails
+  with `invalid_grant — Refresh token was issued to a different client`. Discovered by doing
+  it. The failure is safe (the refresh throws before any write, so the stored grant is
+  untouched) and is a useful property: local cannot silently spend a customer's token. It
+  does mean production data can only be investigated through production.
 - **The access gate fails closed** (2026-08-25) — with `XERO_PAGE_PASSWORD` unset, nothing
   behind the gate is reachable. Forgetting the variable in a deployment locks the page rather
   than silently exposing it, which is the opposite of every security defect found on this
