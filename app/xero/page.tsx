@@ -202,6 +202,17 @@ function Snapshot({ snapshot }: { snapshot: XeroSnapshot }) {
           outstanding totals sum <code>AmountDue</code> on AUTHORISED and SUBMITTED documents
           only, grouped by currency — never across currencies.
         </p>
+        {snapshot.invoicesTruncated ? (
+          <div className="px-5 pb-4">
+            <Notice tone="error" title="These totals are a floor, not the full figure">
+              <p>
+                Xero holds more outstanding invoices than this read returned, so the amounts
+                above are the total of what was fetched — the real position is higher. Treat
+                them as a lower bound until the read covers everything.
+              </p>
+            </Notice>
+          </div>
+        ) : null}
       </Card>
 
       {failures.length > 0 ? (
@@ -221,8 +232,8 @@ function Snapshot({ snapshot }: { snapshot: XeroSnapshot }) {
       ) : null}
 
       <Card
-        title="Invoices and bills"
-        subtitle="ACCREC = money in · ACCPAY = money out. Amounts are integer minor units internally."
+        title="Outstanding invoices and bills"
+        subtitle="ACCREC = money in · ACCPAY = money out. Paid invoices are excluded — this is what is still owed, not a history."
       >
         {commitments.items.length === 0 ? (
           <Empty>No invoices returned for the selected statuses.</Empty>

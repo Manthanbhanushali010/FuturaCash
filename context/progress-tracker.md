@@ -78,12 +78,14 @@ Update this file after every meaningful implementation change.
   so `readXeroSnapshot` compares the granted scope against `XERO_SCOPES` and the screen asks
   for re-authorisation instead of spending a call on a guaranteed 401.
 
+- **Spec 1b — outstanding position** (2026-09-11). Invoices are now selected by outstanding
+  status rather than by a date-ordered window, and the read reports whether it saw everything.
+
 ## In Progress
 
-- **Phase B5 — verify, merge, live check.** Blocked on nothing in code; awaiting approval to
-  merge 9 commits to `main`, plus two config changes that only the operator can make:
-  `XERO_REDIRECT_URI` → `https://www.futuracash.co.uk/api/xero/callback` in Vercel, and the
-  same string registered in the Xero app.
+- **Spec 1b live verification.** Luke to compare both totals against Xero's own Aged
+  Receivables and Aged Payables summaries for JENKI — the only external ground truth
+  available, and his books.
 
 ## Next Up
 
@@ -222,6 +224,19 @@ Update this file after every meaningful implementation change.
   it. The failure is safe (the refresh throws before any write, so the stored grant is
   untouched) and is a useful property: local cannot silently spend a customer's token. It
   does mean production data can only be investigated through production.
+- **Select by what a number means, not by a window that happens to contain it** (2026-09-11,
+  spec-1b) — the outstanding totals were computed from whatever a 200-row date-ordered read
+  returned. Ascending gave JENKI's oldest, all PAID, and both totals were blank. Descending
+  gave the furthest-future due dates, which pushes OVERDUE invoices below the cut: the most
+  cash-relevant invoices a business has, missing from a total that looked authoritative.
+  Fixed by dropping `PAID` from the requested statuses so the page bound is spent on invoices
+  that can still move cash. Chosen over `where=AmountDue>0` because `Statuses` is a documented
+  first-class parameter already proven here, while a where clause on a computed field sits
+  outside Xero's optimised set and risks timeouts on exactly the large orgs it would serve.
+- **A bounded read must say when it was bounded** (2026-09-11) — `fetchInvoices` now returns
+  `{ invoices, truncated }`, and the screen labels the totals a floor when the bound was hit
+  with more available. A confident total over an unknown subset is indistinguishable from a
+  complete one; blank was honest, incomplete-but-confident is not.
 - **The access gate fails closed** (2026-08-25) — with `XERO_PAGE_PASSWORD` unset, nothing
   behind the gate is reachable. Forgetting the variable in a deployment locks the page rather
   than silently exposing it, which is the opposite of every security defect found on this

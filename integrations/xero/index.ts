@@ -46,7 +46,7 @@ export function createXeroConnector(
       return normaliseAccounts(accounts);
     },
     async fetchCommitments(): Promise<NormalisationResult<NormalisedCommitment>> {
-      const invoices = await fetchInvoices(tenantId);
+      const { invoices } = await fetchInvoices(tenantId);
       return normaliseInvoices(invoices, { fallbackCurrency: baseCurrency });
     },
   };
@@ -97,6 +97,13 @@ export interface XeroSnapshot {
   organisation: XeroOrganisationSummary | null;
   accounts: NormalisationResult<NormalisedLedgerAccount>;
   commitments: NormalisationResult<NormalisedCommitment>;
+  /**
+   * True when there are more outstanding invoices than the bounded read returned.
+   *
+   * The totals are then a FLOOR, not the figure. Presenting them unqualified would be a
+   * confident number over an unknown subset — the thing non-negotiable #1 exists to prevent.
+   */
+  invoicesTruncated: boolean;
   bankTransactions: NormalisationResult<NormalisedBankTransaction>;
   /** Scopes the code needs that this grant does not have. Non-empty means re-consent. */
   missingScopes: string[];
@@ -127,7 +134,7 @@ export async function readXeroSnapshot(): Promise<XeroSnapshot> {
   const absent = missingScopes(state.scope);
   const needsBankScope = absent.includes("accounting.banktransactions.read");
 
-  const [accountsPage, invoices, bankTransactions] = await Promise.all([
+  const [accountsPage, invoicesResult, bankTransactions] = await Promise.all([
     fetchChartOfAccounts(tenantId),
     fetchInvoices(tenantId),
     needsBankScope ? Promise.resolve([]) : fetchBankTransactions(tenantId),
@@ -151,7 +158,8 @@ export async function readXeroSnapshot(): Promise<XeroSnapshot> {
         }
       : null,
     accounts: normaliseAccounts(accountsPage.accounts),
-    commitments: normaliseInvoices(invoices, { fallbackCurrency: baseCurrency }),
+    commitments: normaliseInvoices(invoicesResult.invoices, { fallbackCurrency: baseCurrency }),
+    invoicesTruncated: invoicesResult.truncated,
     bankTransactions: normaliseBankTransactions(bankTransactions, {
       fallbackCurrency: baseCurrency,
     }),

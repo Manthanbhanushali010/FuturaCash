@@ -312,6 +312,18 @@ export function clearChartOfAccountsCache(): void {
   chartOfAccountsCache.clear();
 }
 
+export interface FetchInvoicesResult {
+  invoices: XeroInvoice[];
+  /**
+   * True when the page bound was reached with more still available.
+   *
+   * The caller needs to distinguish "this is everything outstanding" from "this is the first
+   * 200 of an unknown number". A total over an unknown subset looks identical to a complete
+   * one, which is the failure this flag exists to make visible.
+   */
+  truncated: boolean;
+}
+
 export interface FetchInvoicesOptions {
   /** Xero invoice statuses to include. Defaults to those representing real commitments. */
   statuses?: readonly string[];
@@ -322,11 +334,25 @@ export interface FetchInvoicesOptions {
 export async function fetchInvoices(
   tenantId: string,
   options: FetchInvoicesOptions = {},
-): Promise<XeroInvoice[]> {
+): Promise<FetchInvoicesResult> {
   // DRAFT is excluded: a draft is not yet a commitment and must not appear as expected cash.
-  const statuses = options.statuses ?? ["AUTHORISED", "SUBMITTED", "PAID"];
+  //
+  // PAID is excluded too, and that is the point of spec-1b. Including it spent the page bound
+  // on settled invoices, so which outstanding ones survived was decided by the date window
+  // rather than by being outstanding. Ascending order returned JENKI's oldest — all paid,
+  // both totals blank. Descending returned the furthest-future due dates, which on an org
+  // with forward-dated invoices pushes OVERDUE ones below the cut: the most cash-relevant
+  // invoices a business has, silently missing from a total that looked authoritative.
+  //
+  // Selecting by status rather than filtering on AmountDue is deliberate: Statuses is a
+  // documented first-class parameter already proven here, whereas a where clause on a
+  // computed field is outside Xero's optimised set and risks timeouts on exactly the large
+  // orgs this is meant to serve. An invoice credited to zero while still AUTHORISED is
+  // handled downstream — core/position.ts ignores any commitment whose amountDue is zero.
+  const statuses = options.statuses ?? ["AUTHORISED", "SUBMITTED"];
   const maxPages = options.maxPages ?? 2;
   const invoices: XeroInvoice[] = [];
+  let truncated = false;
 
   for (let page = 1; page <= maxPages; page += 1) {
     const body = await xeroGet("/Invoices", {
@@ -349,10 +375,12 @@ export async function fetchInvoices(
       throw new XeroApiError(200, "/Invoices", `unexpected payload: ${issues(parsed.error)}`);
     }
     invoices.push(...parsed.data.Invoices);
-    if (parsed.data.Invoices.length < 100) break; // short page — no more to fetch
+    if (parsed.data.Invoices.length < 100) break; // short page — the set is complete
+    // A full page on the final iteration means Xero had more and we stopped asking.
+    if (page === maxPages) truncated = true;
   }
 
-  return invoices;
+  return { invoices, truncated };
 }
 
 export interface FetchBankTransactionsOptions {

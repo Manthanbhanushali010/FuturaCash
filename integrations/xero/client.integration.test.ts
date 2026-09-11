@@ -220,7 +220,7 @@ describe("authorised reads", () => {
     await fetchInvoices(TENANT);
     const url = calls.find((call) => call.url.includes("/Invoices"))!.url;
     // A draft is not a commitment and must not show up as expected cash.
-    expect(url).toContain("Statuses=AUTHORISED%2CSUBMITTED%2CPAID");
+    expect(url).toContain("Statuses=AUTHORISED%2CSUBMITTED");
   });
 
   it("surfaces a 429 as a rate limit error rather than retrying", async () => {
@@ -396,5 +396,105 @@ describe("fetchInvoices ordering", () => {
     const bank = new URL(calls.find((c) => c.url.includes("/BankTransactions"))!.url);
     expect(inv.searchParams.get("order")).toContain("DESC");
     expect(bank.searchParams.get("order")).toContain("DESC");
+  });
+});
+
+describe("spec-1b — outstanding invoices, not a date window", () => {
+  /** An invoice due in the past and still owed: the most cash-relevant kind, and the one
+   *  a date-ordered window silently drops. */
+  const OVERDUE = {
+    InvoiceID: "inv-overdue",
+    InvoiceNumber: "INV-OVERDUE",
+    Type: "ACCREC",
+    Status: "AUTHORISED",
+    Contact: { ContactID: "c-od", Name: "Slow Payer Ltd" },
+    DateString: "2026-06-01T00:00:00",
+    DueDateString: "2026-07-01T00:00:00", // before "today" in these fixtures
+    CurrencyCode: "GBP",
+    Total: 500,
+    AmountDue: 500,
+    AmountPaid: 0,
+  };
+
+  it("does not request PAID invoices", async () => {
+    // Including PAID spent the page bound on settled invoices, so the date window decided
+    // which outstanding ones survived.
+    stubFetch(defaultHandler);
+    await fetchInvoices(TENANT);
+    const url = calls.find((c) => c.url.includes("/Invoices"))!.url;
+    const statuses = new URL(url).searchParams.get("Statuses");
+    expect(statuses).toBe("AUTHORISED,SUBMITTED");
+    expect(statuses).not.toContain("PAID");
+  });
+
+  it("still excludes DRAFT — a draft is not an obligation", async () => {
+    stubFetch(defaultHandler);
+    await fetchInvoices(TENANT);
+    const statuses = new URL(calls.find((c) => c.url.includes("/Invoices"))!.url)
+      .searchParams.get("Statuses");
+    expect(statuses).not.toContain("DRAFT");
+  });
+
+  it("INCLUDES an overdue invoice", async () => {
+    stubFetch((url) =>
+      url.includes("/Invoices") ? { body: { Invoices: [OVERDUE] } } : defaultHandler(url));
+    const { invoices } = await fetchInvoices(TENANT);
+    expect(invoices.map((i) => i.InvoiceID)).toContain("inv-overdue");
+  });
+
+  it("carries an overdue invoice through to the outstanding totals", async () => {
+    stubFetch((url) =>
+      url.includes("/Invoices") ? { body: { Invoices: [OVERDUE] } } : defaultHandler(url));
+    const snapshot = await readXeroSnapshot();
+    const receivable = snapshot.commitments.items.find((c) => c.externalId === "inv-overdue");
+    expect(receivable).toBeDefined();
+    expect(receivable!.direction).toBe("INFLOW");
+    // 500.00 -> integer minor units, and it must reach the position rather than be filtered.
+    expect(receivable!.amountDue.minor).toBe(50000);
+  });
+
+  it("keeps an overdue invoice alongside a future-dated one", async () => {
+    // Ordering must not be able to drop the overdue one when both fit in the page.
+    const future = { ...OVERDUE, InvoiceID: "inv-future", DueDateString: "2027-03-01T00:00:00" };
+    stubFetch((url) =>
+      url.includes("/Invoices") ? { body: { Invoices: [future, OVERDUE] } } : defaultHandler(url));
+    const { invoices } = await fetchInvoices(TENANT);
+    expect(invoices.map((i) => i.InvoiceID).sort()).toEqual(["inv-future", "inv-overdue"]);
+  });
+
+  it("reports truncated when the bound is hit with a full page", async () => {
+    const full = { Invoices: Array.from({ length: 100 }, (_, i) => ({ ...OVERDUE, InvoiceID: `i-${i}` })) };
+    stubFetch((url) => (url.includes("/Invoices") ? { body: full } : defaultHandler(url)));
+    const { invoices, truncated } = await fetchInvoices(TENANT, { maxPages: 2 });
+    expect(invoices).toHaveLength(200);
+    // Xero still had more and we stopped asking — the totals are a floor, not the figure.
+    expect(truncated).toBe(true);
+  });
+
+  it("reports NOT truncated when the final page is short", async () => {
+    let call = 0;
+    stubFetch((url) => {
+      if (!url.includes("/Invoices")) return defaultHandler(url);
+      call += 1;
+      return call === 1
+        ? { body: { Invoices: Array.from({ length: 100 }, (_, i) => ({ ...OVERDUE, InvoiceID: `a-${i}` })) } }
+        : { body: { Invoices: [{ ...OVERDUE, InvoiceID: "tail" }] } };
+    });
+    const { invoices, truncated } = await fetchInvoices(TENANT, { maxPages: 3 });
+    expect(invoices).toHaveLength(101);
+    expect(truncated).toBe(false);
+  });
+
+  it("reports NOT truncated for a single short page", async () => {
+    stubFetch(defaultHandler);
+    const { truncated } = await fetchInvoices(TENANT);
+    expect(truncated).toBe(false);
+  });
+
+  it("carries the truncation flag onto the snapshot", async () => {
+    const full = { Invoices: Array.from({ length: 100 }, (_, i) => ({ ...OVERDUE, InvoiceID: `s-${i}` })) };
+    stubFetch((url) => (url.includes("/Invoices") ? { body: full } : defaultHandler(url)));
+    const snapshot = await readXeroSnapshot();
+    expect(snapshot.invoicesTruncated).toBe(true);
   });
 });
