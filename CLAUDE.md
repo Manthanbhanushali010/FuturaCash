@@ -1,3 +1,9 @@
+## Current status
+
+Read this first — it is kept up to date separately from the rest of this file.
+
+@STATUS.md
+
 ## Application Building Context
 
 This is a **financial application**. It reads real bank and accounting data and

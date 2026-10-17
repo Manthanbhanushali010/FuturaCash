@@ -1,0 +1,98 @@
+# Futura — Status
+
+*Imported by `CLAUDE.md` via `@STATUS.md`, so every Claude Code session loads it
+automatically. Keep this current instead of re-pasting a master context doc. Update it before
+ending a session.*
+
+## Current goal
+
+Finish the Xero data foundation (core cash-flow endpoints) before building the forecast engine.
+
+## Done
+
+- Xero OAuth, encrypted token store, RLS tenant isolation — built & verified live against JENKI
+- Bank transactions — built, live; `LineItems.Description` fix shipped
+- Invoices — built, live
+
+## Today's priority, in order
+
+1. ~~Check whether the 1 Oct combined deploy shipped.~~ **VERIFIED 2026-10-17: it did not.**
+   `origin/main` is still `9457e07` (11 Sep). None of it is present:
+   - `accounting.payments.read` — absent from `XERO_SCOPES`
+   - `accounting.journals.read` — absent (and see the pricing gate below; may never be added)
+   - bank-transaction truncation flag — absent; `fetchBankTransactions` still `maxPages ?? 2`
+   - invoice fix — present in the WORKING TREE only, uncommitted since 25 Sep
+   Luke cannot have re-authorised for payments, because production has never requested
+   that scope.
+2. **Ship the invoice fix** — `DueDate ASC` + `maxPages ?? 10`, 250 tests passing. Was sitting
+   uncommitted for three weeks; uncommitted work is the one thing a recovered session cannot
+   restore.
+3. **Purchase orders is ambiguous** — Luke listed it in both "build now" and "post-MVP". Ask
+   before building either way.
+4. **Once resolved**: Repeating Invoices and Credit Notes are the next clean, scoped builds —
+   same pattern as `fetchInvoices`.
+
+## Next up (not started)
+
+- **`accounting.payments.read`** — the structural fix for Luke's missing payments. All four
+  payment-family endpoints (`/Payments`, `/BatchPayments`, `/Prepayments`, `/Overpayments`)
+  returned **401 AuthorizationUnsuccessful** on 1 Oct: not empty, not 404 — unpermitted. One
+  scope covers all four. Requires another re-consent from Luke.
+- **Bank-transaction truncation** — 200 rows covered only a 14-day window on JENKI
+  (~14 transactions/day) with no flag. Invoices got the flag in spec-1b; bank transactions
+  did not.
+- Bank accounts (confirm whether already implicit via bank transactions)
+- Repeating invoices, Purchase orders (pending Luke), Credit notes
+- Enhance bucket: Contacts, Contact groups, Tracking categories (likely the answer to the
+  site/revenue-centre enrichment Luke wants — JENKI is multi-location; `Tracking` already
+  arrives on line items via `.passthrough()` and is never read), Linked transactions,
+  Organisation, Tax rates
+- `CNY` is unsupported in `core/money.ts` — one JENKI transaction is excluded from totals and
+  reported as a normalisation failure. `core/` is protected, so this needs a deliberate call.
+- The forecast engine itself — not started. Everything above is still data foundation.
+
+## Known gate (confirmed Oct 2026 — don't re-litigate)
+
+Xero's `/Journals` endpoint now requires the Advanced pricing tier (~$1,445 AUD/month) plus a
+security assessment and Xero use-case approval — not just another scope to request.
+`ManualJournals` stays free at all tiers. Luke's "later" placement for Journals was right, for
+a cost/approval reason neither of us knew until this was checked.
+
+## Working discipline (established, don't relitigate)
+
+- Verify empirically before declaring anything done — config that "looks right" has failed
+  silently before (RLS bypassed by a role attribute, a stale Prisma client, a missing env var,
+  and a "banks don't send detail" assumption that was flatly wrong)
+- A bounded read must say when it was bounded. A confident total over an unknown subset is
+  indistinguishable from a complete one
+- One branch, one step at a time
+- Merge gate: tests + typecheck + lint + build + a live functional test — not just "it compiles"
+- Protected paths unless the task is specifically about them: `core/`, `evals/`, `app/xero/`,
+  `app/api/xero/`, `integrations/xero/`
+- Never `prisma migrate dev` against Neon — only `migrate deploy`
+- App connects as `futura_app` (NOBYPASSRLS), never `neondb_owner` (migrations only)
+- **Local cannot read JENKI's Xero.** Local `.env` uses the `CashFlow Dev` app; Luke's token
+  was issued by `FuturaCash`, so a local refresh fails with
+  `invalid_grant — Refresh token was issued to a different client`. It fails safely (throws
+  before any write), and it means production data can only be surveyed through production, or
+  from local inside the 30-minute window after production has refreshed the token.
+
+## Open questions
+
+- Who is "James" — Luke mentioned him re: data for a Wednesday pipeline session. Confirm
+  whether this is the Xero-embedded developer introduced via David Tuck/Mayday under a
+  different name, or someone new.
+- Enable Banking vs. GoCardless Bank Account Data — evaluating as a richer bank-data source
+  than Xero's reconciled view. Enable Banking quoted ~£800/month (volume-based, possibly a
+  negotiable ramp-up); GoCardless pricing pending their sales team.
+- Xero Bank Feeds API beta (via Luke's "remitclear" contact) — a channel for *posting*
+  statement data into Xero, not pulling richer data out. Only relevant after a real bank-data
+  source is chosen — not an alternative to choosing one.
+- Does JENKI use Xero Tracking Categories? (Settings → Advanced → Tracking categories.) If yes,
+  "site" and "revenue centre" are a small build. If the list is empty, the data does not exist.
+
+## Companion docs
+
+`futura-payments-endpoints-breakdown.md` and `futura-xero-endpoint-roadmap.md` are referenced as
+the full endpoint-by-endpoint picture. **Neither is currently in this repo** — they live outside
+it. Add them here if they should be version-controlled alongside this file.
