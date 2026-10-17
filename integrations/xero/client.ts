@@ -327,7 +327,11 @@ export interface FetchInvoicesResult {
 export interface FetchInvoicesOptions {
   /** Xero invoice statuses to include. Defaults to those representing real commitments. */
   statuses?: readonly string[];
-  /** Xero pages at 100 invoices. Bounded so one read cannot burn the daily call budget. */
+  /**
+   * Xero pages at 100 invoices. Bounded so one read cannot burn the daily call budget —
+   * but the bound is now deliberately generous, because JENKI proved 2 pages was not enough
+   * to hold even one organisation's outstanding set.
+   */
   maxPages?: number;
 }
 
@@ -350,7 +354,11 @@ export async function fetchInvoices(
   // orgs this is meant to serve. An invoice credited to zero while still AUTHORISED is
   // handled downstream — core/position.ts ignores any commitment whose amountDue is zero.
   const statuses = options.statuses ?? ["AUTHORISED", "SUBMITTED"];
-  const maxPages = options.maxPages ?? 2;
+  // 10 pages -> up to 1,000 invoices. Two was not enough: JENKI filled it entirely with
+  // future-dated invoices and the truncation notice fired on every load. Costs up to 10
+  // calls per uncached read against 60/min and 5,000/day, so roughly 380 page loads a day
+  // for one organisation — comfortable now, worth revisiting when there are several.
+  const maxPages = options.maxPages ?? 10;
   const invoices: XeroInvoice[] = [];
   let truncated = false;
 
@@ -360,14 +368,19 @@ export async function fetchInvoices(
       searchParams: {
         Statuses: statuses.join(","),
         page: String(page),
-        // DESC, so a bounded read returns the MOST RECENT invoices.
+        // ASCENDING — oldest first, which now means MOST OVERDUE first.
         //
-        // This was ascending, which on an org with years of history returned the oldest 200 —
-        // for JENKI, invoices due between 2020-11 and 2021-09, every one of them long since
-        // PAID. The screen showed five-year-old history as if it were the current position,
-        // and both outstanding totals rendered blank because nothing in the page was still
-        // owed. Bank transactions already ordered Date DESC; invoices were the odd one out.
-        order: "DueDate DESC",
+        // The history here matters, because ascending was the original bug. It failed then
+        // only because PAID was included, so "oldest" meant "settled years ago": JENKI's
+        // oldest 200 were due 2020-11 to 2021-09 and every one had been paid, leaving both
+        // totals blank. Flipping to DESC fixed that symptom and introduced a worse one —
+        // the furthest-future due dates filled all 200 slots, so not one OVERDUE invoice
+        // reached the position. Those are the invoices a business most needs to see.
+        //
+        // With PAID excluded (spec-1b) ascending is correct on its own terms: oldest
+        // outstanding IS most overdue. And if the bound still truncates, it now drops
+        // invoices due next spring rather than ones that were due last month.
+        order: "DueDate ASC",
       },
     });
     const parsed = InvoicesResponse.safeParse(body);

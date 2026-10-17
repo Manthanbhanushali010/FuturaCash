@@ -375,27 +375,28 @@ describe("fetchBankTransactions", () => {
 });
 
 describe("fetchInvoices ordering", () => {
-  it("requests the MOST RECENT invoices, not the oldest", async () => {
-    // Ascending order returned JENKI's oldest 200 -- due 2020-11 to 2021-09, all PAID -- so
-    // the screen showed five-year-old history as the current position and both outstanding
-    // totals rendered blank. A bounded read must start from the end that matters.
+  it("requests the MOST OVERDUE invoices first", async () => {
+    // Ascending was the original bug, and is now correct, because the reason it failed has
+    // gone: PAID is excluded, so "oldest" no longer means "settled years ago" -- it means
+    // most overdue. If the bound truncates, it must drop next spring, not last month.
     stubFetch(defaultHandler);
     await fetchInvoices(TENANT);
     const url = calls.find((c) => c.url.includes("/Invoices"))!.url;
     // Parse the param: URLSearchParams encodes the space as "+", which decodeURIComponent
     // leaves alone, so a naive string match on "DueDate DESC" never matches.
-    expect(new URL(url).searchParams.get("order")).toBe("DueDate DESC");
+    expect(new URL(url).searchParams.get("order")).toBe("DueDate ASC");
   });
 
-  it("orders invoices the same way as bank transactions", async () => {
-    // Both are bounded reads over an unbounded history; they must agree on which end to take.
+  it("orders each read from the end that matters for its own purpose", async () => {
+    // Deliberately opposite. Invoices answer "what is still owed", so the oldest outstanding
+    // matter most. Bank transactions answer "what has just happened", so the newest do.
     stubFetch(defaultHandler);
     await fetchInvoices(TENANT);
     await fetchBankTransactions(TENANT);
     const inv = new URL(calls.find((c) => c.url.includes("/Invoices"))!.url);
     const bank = new URL(calls.find((c) => c.url.includes("/BankTransactions"))!.url);
-    expect(inv.searchParams.get("order")).toContain("DESC");
-    expect(bank.searchParams.get("order")).toContain("DESC");
+    expect(inv.searchParams.get("order")).toBe("DueDate ASC");
+    expect(bank.searchParams.get("order")).toBe("Date DESC");
   });
 });
 
@@ -496,5 +497,54 @@ describe("spec-1b — outstanding invoices, not a date window", () => {
     stubFetch((url) => (url.includes("/Invoices") ? { body: full } : defaultHandler(url)));
     const snapshot = await readXeroSnapshot();
     expect(snapshot.invoicesTruncated).toBe(true);
+  });
+});
+
+describe("overdue invoices survive the page bound", () => {
+  const overdue = (n: number) => ({
+    InvoiceID: `od-${n}`, InvoiceNumber: `OD-${n}`, Type: "ACCREC", Status: "AUTHORISED",
+    DueDateString: "2026-07-01T00:00:00", CurrencyCode: "GBP",
+    Total: 100, AmountDue: 100, AmountPaid: 0,
+  });
+  const future = (n: number) => ({
+    InvoiceID: `fu-${n}`, InvoiceNumber: `FU-${n}`, Type: "ACCREC", Status: "AUTHORISED",
+    DueDateString: "2027-03-31T00:00:00", CurrencyCode: "GBP",
+    Total: 100, AmountDue: 100, AmountPaid: 0,
+  });
+
+  it("defaults to 10 pages, so one org's outstanding set fits", async () => {
+    // Two pages held 200, and JENKI filled every slot with future-dated invoices.
+    const full = { Invoices: Array.from({ length: 100 }, (_, i) => future(i)) };
+    stubFetch((url) => (url.includes("/Invoices") ? { body: full } : defaultHandler(url)));
+    const { invoices } = await fetchInvoices(TENANT);
+    expect(calls.filter((c) => c.url.includes("/Invoices"))).toHaveLength(10);
+    expect(invoices).toHaveLength(1000);
+  });
+
+  it("returns overdue invoices when Xero orders ascending, even if the bound truncates", async () => {
+    // Xero applies the order server-side, so page 1 of an ASC read is the most overdue.
+    // This is the regression that mattered: under DESC, zero overdue rows reached the page.
+    const page1 = { Invoices: Array.from({ length: 100 }, (_, i) => overdue(i)) };
+    stubFetch((url) => (url.includes("/Invoices") ? { body: page1 } : defaultHandler(url)));
+    const { invoices, truncated } = await fetchInvoices(TENANT, { maxPages: 1 });
+    expect(invoices.every((i) => String(i.InvoiceNumber).startsWith("OD-"))).toBe(true);
+    expect(truncated).toBe(true);
+  });
+
+  it("carries an overdue invoice into the outstanding totals", async () => {
+    stubFetch((url) =>
+      url.includes("/Invoices") ? { body: { Invoices: [overdue(1)] } } : defaultHandler(url));
+    const snapshot = await readXeroSnapshot();
+    const row = snapshot.commitments.items.find((c) => c.externalId === "od-1");
+    expect(row?.direction).toBe("INFLOW");
+    expect(row?.amountDue.minor).toBe(10000);
+  });
+
+  it("still reports truncation honestly at the higher bound", async () => {
+    const full = { Invoices: Array.from({ length: 100 }, (_, i) => overdue(i)) };
+    stubFetch((url) => (url.includes("/Invoices") ? { body: full } : defaultHandler(url)));
+    const { truncated } = await fetchInvoices(TENANT);
+    // 10 full pages means Xero had an 11th. A bigger bound is not a complete one.
+    expect(truncated).toBe(true);
   });
 });
