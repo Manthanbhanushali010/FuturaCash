@@ -34,13 +34,25 @@ Finish the Xero data foundation (core cash-flow endpoints) before building the f
 
 ## Next up (not started)
 
-- ~~`accounting.payments.read`~~ **ADDED 2026-10-19 (committed, not yet pushed).** Unlocks
+- ~~`accounting.payments.read`~~ **IN PRODUCTION 2026-10-22, verified live.** The authorize URL
+  on www.futuracash.co.uk now requests nine scopes ending in `accounting.payments.read`;
+  `accounting.journals.read` confirmed absent. Unlocks
   `/Payments`, `/BatchPayments`, `/Prepayments`, `/Overpayments` — one scope, four endpoints.
   `accounting.journals.read` deliberately NOT added: the Advanced-tier gate means the scope
   would not unlock it, and asking for an unusable permission costs a re-consent for nothing.
-  **Still needs: push → Luke re-authorises → survey the real payloads → then build.** No
-  normaliser or display exists yet; re-consenting does not make a Payments table appear.
-- ~~Bank-transaction truncation~~ **FIXED 2026-10-19 (committed, not yet pushed).**
+  **NEXT STEP IS LUKE RE-AUTHORISING.** No normaliser or display exists yet — re-consenting
+  does not make a Payments table appear. After he consents: survey the real payloads, then
+  scope the build.
+  **Note: `/xero` does NOT prompt him.** The re-consent guard checks only
+  `accounting.banktransactions.read`, which he already holds, so `missingScopes` now contains
+  the payments scope and nothing on screen says so. He has to be told out of band. Worth
+  generalising the guard to any missing scope before a fourth scope is ever added.
+- ~~Bank-transaction truncation~~ **IN PRODUCTION 2026-10-22, verified live.** Bank
+  transactions read jumped 200 → **1000**, and the slice notice is **FIRING** — JENKI holds more
+  than 1,000, so the honest answer is now on screen. Expect it to fire permanently: at ~14
+  transactions/day, 1,000 rows is about 71 days against years of history, so pagination alone
+  can never make this complete. Date-bounded queries would be the real answer if completeness
+  is ever needed here.
   `fetchBankTransactions` now returns `{ transactions, truncated }` at `maxPages ?? 10`, and the
   screen says plainly when the list is a recent slice rather than the full history. Previously
   `maxPages ?? 2` with no flag. Invoices got the flag in spec-1b; bank transactions did not.
