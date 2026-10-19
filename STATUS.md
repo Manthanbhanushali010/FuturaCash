@@ -38,10 +38,17 @@ Finish the Xero data foundation (core cash-flow endpoints) before building the f
   payment-family endpoints (`/Payments`, `/BatchPayments`, `/Prepayments`, `/Overpayments`)
   returned **401 AuthorizationUnsuccessful** on 1 Oct: not empty, not 404 — unpermitted. One
   scope covers all four. Requires another re-consent from Luke.
+  **`/Overpayments` and `/Prepayments` are free wins in the same deploy** — same scope, same
+  pull, no extra request. They hold real cash in the bank not yet matched to an invoice, so
+  omitting them understates the position in exactly the case that reads as "why don't these
+  numbers match the account".
 - **Bank-transaction truncation** — 200 rows covered only a 14-day window on JENKI
   (~14 transactions/day) with no flag. Invoices got the flag in spec-1b; bank transactions
   did not.
-- Bank accounts (confirm whether already implicit via bank transactions)
+- ~~Bank accounts~~ **RESOLVED 2026-10-19 — already built, nothing to do.** Not a separate
+  endpoint: it is `GET /Accounts` filtered to `Type=BANK`, and that fetch has been live since
+  Spec 1. `normalise.ts:192` sets `isBankAccount`, the page renders a `bank` pill. Live on
+  production: 341 accounts read, 32 flagged as bank accounts.
 - Repeating invoices, Purchase orders (pending Luke), Credit notes
 - Enhance bucket: Contacts, Contact groups, Tracking categories (likely the answer to the
   site/revenue-centre enrichment Luke wants — JENKI is multi-location; `Tracking` already
@@ -88,11 +95,17 @@ a cost/approval reason neither of us knew until this was checked.
 - Xero Bank Feeds API beta (via Luke's "remitclear" contact) — a channel for *posting*
   statement data into Xero, not pulling richer data out. Only relevant after a real bank-data
   source is chosen — not an alternative to choosing one.
+- Does money move between JENKI's own bank accounts? If so `/BankTransfers` matters — with six
+  locations, ignoring it could make individual account balances wrong even when the consolidated
+  position is right. Ask Luke rather than assuming.
 - Does JENKI use Xero Tracking Categories? (Settings → Advanced → Tracking categories.) If yes,
   "site" and "revenue centre" are a small build. If the list is empty, the data does not exist.
 
 ## Companion docs
 
-`futura-payments-endpoints-breakdown.md` and `futura-xero-endpoint-roadmap.md` are referenced as
-the full endpoint-by-endpoint picture. **Neither is currently in this repo** — they live outside
-it. Add them here if they should be version-controlled alongside this file.
+- `futura-xero-endpoint-roadmap.md` — **in the repo** as of 2026-10-19. All thirteen of Luke's
+  endpoints mapped against current status, the general-ledger/Journals research, and a triage of
+  the remaining ~30 Accounting API resources. Carries a "Verified against the repo" section at
+  the foot recording two claims that were out of date when it was committed.
+- `futura-payments-endpoints-breakdown.md` — **still absent.** The Mayday-meeting diagnosis of
+  why Payments/BatchPayments were 401ing. Add it so a fresh session can read it.
