@@ -155,10 +155,15 @@ re-authorise message, when it's actually sent, should only mention payments.
   Tracking Categories concept, but whether JENKI's org actually uses Tracking Categories at
   all is now the open question that decides if this is buildable — confirm before investing
   time in it.
-- **New, from the 17 Oct verification:** a 14-day window on bank-transaction fetches
-  (separate from the pagination/truncation issue — worth understanding exactly what's
-  bounding it), and an unsupported CNY-denominated transaction the normaliser can't yet
-  handle, which means multi-currency may matter sooner than assumed.
+- **From the 17 Oct verification, resolved 22 Oct:** the apparent 14-day window on
+  bank-transaction fetches is not a separate bound — `fetchBankTransactions` sends no date
+  filter at all; it's simply the 200-row cap divided by JENKI's ~14 transactions/day, the
+  same truncation defect the invoice fix just resolved, not an independent issue.
+- **Confirmed, not just suspected, as of 22 Oct:** the invoice fix going live surfaced
+  $3,612.50 USD as a separate payable line (correctly grouped per-currency, never summed
+  across), on top of the CNY transaction already known about — JENKI trades in at least
+  three currencies. The roadmap doc's earlier "Currencies probably not relevant" triage was
+  wrong; corrected there.
 - **The forecast engine itself** — still not started. This entire payments/journals
   effort is still part of the *data foundation*, not the forecasting product.
 
@@ -173,32 +178,50 @@ anything; `STATUS.md` in the repo now carries the live, verified state going for
 
 ---
 
-## Verified against the repo (2026-10-19)
+## Mechanics behind the Part 7 resolutions, and current deploy state
 
-**The "14-day window" in Part 7 is not a separate bound — it is the 200-row cap.**
+*Appended on commit. Part 7 now carries the conclusions; this keeps the detail that a prose
+summary loses, plus where the build actually stands.*
 
-`fetchBankTransactions` sends exactly three query parameters, and none of them is a date:
+**Why the 14-day window had no independent fix.** `fetchBankTransactions` sends exactly three
+query parameters, none of them a date:
 
 ```
 searchParams: { where, page: String(page), order: "Date DESC" }
                   ^ Status=="AUTHORISED" only
 ```
 
-There is no `Modified-After` header, no date range, no `where` clause on `Date`. The window is
-arithmetic, not configuration:
+No `Modified-After` header, no date range, no `where` clause on `Date`. So:
 
 ```
-maxPages 2  x  100 rows/page   = 200 rows, newest first
-JENKI measured volume          = ~14 transactions/day
-200 / 14                       = ~14 days
+maxPages 2  x  100 rows/page  = 200 rows, newest first
+JENKI measured volume         = ~14 transactions/day
+200 / 14                      = ~14 days
 ```
 
-So it is the *same* defect, not a second one, and it has no independent fix: raising `maxPages`
-widens the window proportionally. At `maxPages: 10` the same arithmetic gives roughly 70 days.
-This matters because treating it as a separate bound would send someone hunting for a date
-filter that does not exist — the correction is recorded here so that does not happen a third
-time.
+**The consequence is worse than a short window.** The cap is on ROWS, not days, so the visible
+history silently narrows as the business gets busier — a seasonal spike in card takings
+shortens it with no code change. At `maxPages: 10` the same arithmetic gives roughly 70 days
+today, and less next December. A test now asserts the fetch sends only `where`/`page`/`order`,
+because this was twice mistaken for a separate date bound.
 
-The practical consequence is worse than a short window, though: because the cap is on *rows*
-rather than days, the window silently narrows as the business grows busier. A seasonal spike in
-card takings shortens the visible history without anything in the code changing.
+**Deploy state as of this commit:**
+
+| Item | State |
+|---|---|
+| Overdue-invoice fix (`DueDate ASC`, `maxPages: 10`) | **shipped** — `0eeed9d`, live, verified |
+| `accounting.payments.read` | **committed, NOT pushed** — `54543b7` |
+| Bank-transaction truncation flag + `maxPages: 10` | **committed, NOT pushed** — `54543b7` |
+| `accounting.journals.read` | **dropped** — Advanced-tier gate; a test pins its absence |
+| Payments/BatchPayments/Prepayments/Overpayments normalisers & display | **not started** — survey first |
+
+The invoice fix going live is what produced the figures quoted in Part 7: **814 outstanding
+invoices** (within the 1,000 bound, so the totals are complete rather than a floor), **200 of
+200 displayed rows overdue** where previously none were, receivable **£42,097.99** and payable
+**£471,048.96 + $3,612.50 USD**. The oldest unpaid invoice is dated **2025-09-05**, thirteen
+months back — worth Luke's eye, since it affects whether £471k is a live obligation or stale
+data never closed off in Xero.
+
+**Still Luke's to confirm, not ours:** spec-1b's acceptance test was always that both totals
+match Xero's own Aged Receivables and Aged Payables summaries. Complete-within-the-bound is
+verified; *correct* is not, and only he can run that comparison against his own books.
