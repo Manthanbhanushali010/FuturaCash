@@ -42,9 +42,13 @@ Finish the Xero data foundation (core cash-flow endpoints) before building the f
   pull, no extra request. They hold real cash in the bank not yet matched to an invoice, so
   omitting them understates the position in exactly the case that reads as "why don't these
   numbers match the account".
-- **Bank-transaction truncation** — 200 rows covered only a 14-day window on JENKI
-  (~14 transactions/day) with no flag. Invoices got the flag in spec-1b; bank transactions
-  did not.
+- **Bank-transaction truncation** — `fetchBankTransactions` is still `maxPages ?? 2` with no
+  truncation flag. Invoices got the flag in spec-1b; bank transactions did not.
+  **The "14-day window" is this same defect, not a separate one** (verified 2026-10-19: the
+  fetch sends only `where`/`page`/`order`, no date filter at all). 200 rows ÷ ~14 txns/day ≈ 14
+  days, so the window is arithmetic. Raising `maxPages` widens it proportionally — at 10 pages,
+  roughly 70 days. Note the cap is on ROWS, so the visible window silently narrows as JENKI
+  gets busier.
 - ~~Bank accounts~~ **RESOLVED 2026-10-19 — already built, nothing to do.** Not a separate
   endpoint: it is `GET /Accounts` filtered to `Type=BANK`, and that fetch has been live since
   Spec 1. `normalise.ts:192` sets `isBankAccount`, the page renders a `bank` pill. Live on
@@ -98,6 +102,11 @@ a cost/approval reason neither of us knew until this was checked.
 - Does money move between JENKI's own bank accounts? If so `/BankTransfers` matters — with six
   locations, ignoring it could make individual account balances wrong even when the consolidated
   position is right. Ask Luke rather than assuming.
+- **Does JENKI deal in foreign currency routinely, or was the CNY transaction a one-off?** One
+  CNY-denominated transaction is currently excluded from the totals and reported as a
+  normalisation failure. `Currencies` had been triaged as "probably irrelevant for a UK matcha
+  bar chain" — this is evidence against that. Ask Luke rather than guessing; the answer decides
+  whether `core/money.ts` needs one currency added or a general multi-currency approach.
 - Does JENKI use Xero Tracking Categories? (Settings → Advanced → Tracking categories.) If yes,
   "site" and "revenue centre" are a small build. If the list is empty, the data does not exist.
 
@@ -107,5 +116,7 @@ a cost/approval reason neither of us knew until this was checked.
   endpoints mapped against current status, the general-ledger/Journals research, and a triage of
   the remaining ~30 Accounting API resources. Carries a "Verified against the repo" section at
   the foot recording two claims that were out of date when it was committed.
-- `futura-payments-endpoints-breakdown.md` — **still absent.** The Mayday-meeting diagnosis of
-  why Payments/BatchPayments were 401ing. Add it so a fresh session can read it.
+- `futura-payments-endpoints-breakdown.md` — **in the repo** as of 2026-10-19. The
+  Mayday-meeting diagnosis of why Payments/BatchPayments were 401ing, the approved deploy plan,
+  and the step-by-step re-authorisation sequence. Carries a "Verified against the repo" section
+  correcting the "14-day window" as a separate finding.
