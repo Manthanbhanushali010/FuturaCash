@@ -8,8 +8,16 @@ import type {
   NormalisedLedgerAccount,
 } from "../types";
 import { parseXeroDate } from "./dates";
-import type { XeroAccount, XeroBankTransaction, XeroInvoice } from "./schemas";
-import type { NormalisedBankTransaction } from "./types";
+import type {
+  PaymentSource,
+  XeroAccount,
+  XeroBankTransaction,
+  XeroBatchPayment,
+  XeroInvoice,
+  XeroPayment,
+  XeroUnallocatedCredit,
+} from "./schemas";
+import type { NormalisedBankTransaction, NormalisedProviderPayment } from "./types";
 
 /**
  * Xero → internal model. This file is the anti-corruption boundary (invariant #6): past it,
@@ -174,6 +182,149 @@ export function normaliseBankTransactions(
     transactions,
     (transaction) => normaliseBankTransaction(transaction, options),
     (transaction) => transaction.BankTransactionID,
+  );
+}
+
+/**
+ * Direction for the payment family. Fatal on an unrecognised type, as everywhere else — a
+ * guessed direction flips cash in the forecast.
+ *
+ * ACCREC* is money in (a customer settling our invoice), ACCPAY* money out (us settling a
+ * bill). RECBATCH/PAYBATCH are the batch equivalents. Prepayments and overpayments use the
+ * same ACCREC/ACCPAY prefixes.
+ */
+function toPaymentDirection(type: string): CommitmentDirection {
+  if (type.startsWith("ACCREC") || type === "RECBATCH") return "INFLOW";
+  if (type.startsWith("ACCPAY") || type === "PAYBATCH") return "OUTFLOW";
+  throw new Error(`Unrecognised Xero payment type "${type}"`);
+}
+
+export interface NormalisePaymentOptions {
+  fallbackCurrency: CurrencyCode;
+}
+
+export function normalisePayment(
+  payment: XeroPayment,
+  options: NormalisePaymentOptions,
+): NormalisedProviderPayment {
+  const currency = options.fallbackCurrency;
+  return {
+    externalId: payment.PaymentID,
+    provider: "XERO",
+    source: "PAYMENT",
+    direction: toPaymentDirection(payment.PaymentType ?? ""),
+    providerType: payment.PaymentType ?? "",
+    status: toStatus(payment.Status ?? ""),
+    providerStatus: payment.Status ?? "",
+    reference: payment.Reference ?? null,
+    isReconciled: payment.IsReconciled ?? false,
+    counterpartyName: payment.Invoice?.Contact?.Name ?? null,
+    documentNumber: payment.Invoice?.InvoiceNumber ?? null,
+    documentExternalId: payment.Invoice?.InvoiceID ?? null,
+    accountExternalId: payment.Account?.AccountID ?? null,
+    accountCode: payment.Account?.Code ?? null,
+    paidAt: parseXeroDate(payment.Date, undefined),
+    currency,
+    amount: toMoney(payment.Amount, currency, "Amount"),
+    // Already applied to a document by definition.
+    remainingCredit: money(0, currency),
+    raw: payment,
+  };
+}
+
+export function normaliseBatchPayment(
+  batch: XeroBatchPayment,
+  options: NormalisePaymentOptions,
+): NormalisedProviderPayment {
+  const currency = options.fallbackCurrency;
+  return {
+    externalId: batch.BatchPaymentID,
+    provider: "XERO",
+    source: "BATCH_PAYMENT",
+    direction: toPaymentDirection(batch.Type ?? ""),
+    providerType: batch.Type ?? "",
+    status: toStatus(batch.Status ?? ""),
+    providerStatus: batch.Status ?? "",
+    // Xero offers several narrative fields on a batch and populates them inconsistently;
+    // first non-empty wins. Which one is actually used by JENKI is a question for the survey.
+    reference:
+      [batch.Reference, batch.Narrative, batch.Particulars, batch.Details]
+        .map((value) => value?.trim())
+        .find((value) => value) ?? null,
+    isReconciled: batch.IsReconciled ?? false,
+    counterpartyName: null, // a batch spans many contacts
+    documentNumber: null,
+    documentExternalId: null,
+    accountExternalId: batch.Account?.AccountID ?? null,
+    accountCode: batch.Account?.Code ?? null,
+    paidAt: parseXeroDate(batch.Date, undefined),
+    currency,
+    amount: toMoney(batch.Amount, currency, "Amount"),
+    remainingCredit: money(0, currency),
+    raw: batch,
+  };
+}
+
+/** Prepayments and overpayments share a shape; `source` distinguishes them. */
+export function normaliseUnallocatedCredit(
+  credit: XeroUnallocatedCredit,
+  source: Extract<PaymentSource, "PREPAYMENT" | "OVERPAYMENT">,
+  options: NormalisePaymentOptions,
+): NormalisedProviderPayment {
+  const currency = credit.CurrencyCode
+    ? parseCurrency(credit.CurrencyCode)
+    : options.fallbackCurrency;
+  const id = credit.PrepaymentID ?? credit.OverpaymentID;
+  if (!id) {
+    throw new Error(`${source} is missing both PrepaymentID and OverpaymentID`);
+  }
+  return {
+    externalId: id,
+    provider: "XERO",
+    source,
+    direction: toPaymentDirection(credit.Type ?? ""),
+    providerType: credit.Type ?? "",
+    status: toStatus(credit.Status ?? ""),
+    providerStatus: credit.Status ?? "",
+    reference: credit.Reference ?? null,
+    isReconciled: false,
+    counterpartyName: credit.Contact?.Name ?? null,
+    documentNumber: null,
+    documentExternalId: null,
+    accountExternalId: null,
+    accountCode: null,
+    paidAt: parseXeroDate(credit.Date, undefined),
+    currency,
+    amount: toMoney(credit.Total, currency, "Total"),
+    // The cash-relevant figure: money in the bank with nothing matched against it yet.
+    remainingCredit: toMoney(credit.RemainingCredit, currency, "RemainingCredit"),
+    raw: credit,
+  };
+}
+
+export function normalisePayments(
+  payments: readonly XeroPayment[],
+  options: NormalisePaymentOptions,
+): NormalisationResult<NormalisedProviderPayment> {
+  return collect(payments, (p) => normalisePayment(p, options), (p) => p.PaymentID);
+}
+
+export function normaliseBatchPayments(
+  batches: readonly XeroBatchPayment[],
+  options: NormalisePaymentOptions,
+): NormalisationResult<NormalisedProviderPayment> {
+  return collect(batches, (b) => normaliseBatchPayment(b, options), (b) => b.BatchPaymentID);
+}
+
+export function normaliseUnallocatedCredits(
+  credits: readonly XeroUnallocatedCredit[],
+  source: Extract<PaymentSource, "PREPAYMENT" | "OVERPAYMENT">,
+  options: NormalisePaymentOptions,
+): NormalisationResult<NormalisedProviderPayment> {
+  return collect(
+    credits,
+    (c) => normaliseUnallocatedCredit(c, source, options),
+    (c) => c.PrepaymentID ?? c.OverpaymentID,
   );
 }
 

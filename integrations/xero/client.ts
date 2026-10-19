@@ -12,14 +12,21 @@ import {
 import {
   AccountsResponse,
   BankTransactionsResponse,
+  BatchPaymentsResponse,
   ConnectionsResponse,
+  OverpaymentsResponse,
+  PaymentsResponse,
+  PrepaymentsResponse,
   InvoicesResponse,
   OrganisationsResponse,
   TokenErrorResponse,
   TokenResponse,
   type XeroAccount,
   type XeroBankTransaction,
+  type XeroBatchPayment,
   type XeroInvoice,
+  type XeroPayment,
+  type XeroUnallocatedCredit,
   type XeroOrganisation,
 } from "./schemas";
 import {
@@ -453,6 +460,133 @@ export async function fetchBankTransactions(
   }
 
   return { transactions, truncated };
+}
+
+// --- the payment family -----------------------------------------------------
+//
+// Four endpoints, one scope. /BankTransactions only ever carried direct bank-level entries, so
+// a payment matched against an invoice never appeared there at any page depth — this is where
+// that money actually lives. All four follow the same shape as fetchBankTransactions: same
+// xeroGet path, so they inherit the Xero-Tenant-Id header, 429 handling and zod validation at
+// the boundary; same page bound; same honest truncation flag.
+
+export interface PagedResult<T> {
+  items: T[];
+  /** True when the bound was hit with more available. A subset, not the whole. */
+  truncated: boolean;
+}
+
+export interface FetchPagedOptions {
+  maxPages?: number;
+}
+
+/**
+ * Shared paging loop for the payment family.
+ *
+ * Deliberately generic: four endpoints that page identically should not have four copies of the
+ * same off-by-one risk. `order` is per-endpoint because the right end of history differs —
+ * payments answer "what moved recently", so newest first.
+ */
+async function fetchPaged<T>(
+  path: string,
+  key: string,
+  parse: (body: unknown) => { success: true; items: T[] } | { success: false; detail: string },
+  tenantId: string,
+  order: string,
+  options: FetchPagedOptions = {},
+): Promise<PagedResult<T>> {
+  const maxPages = options.maxPages ?? 10;
+  const items: T[] = [];
+  let truncated = false;
+
+  for (let page = 1; page <= maxPages; page += 1) {
+    const body = await xeroGet(path, { tenantId, searchParams: { page: String(page), order } });
+    const parsed = parse(body);
+    if (!parsed.success) {
+      throw new XeroApiError(200, path, `unexpected payload: ${parsed.detail}`);
+    }
+    items.push(...parsed.items);
+    if (parsed.items.length < 100) break; // short page — the set is complete
+    if (page === maxPages) truncated = true;
+  }
+  void key;
+  return { items, truncated };
+}
+
+export async function fetchPayments(
+  tenantId: string,
+  options: FetchPagedOptions = {},
+): Promise<PagedResult<XeroPayment>> {
+  return fetchPaged<XeroPayment>(
+    "/Payments",
+    "Payments",
+    (body) => {
+      const p = PaymentsResponse.safeParse(body);
+      return p.success
+        ? { success: true, items: p.data.Payments }
+        : { success: false, detail: issues(p.error) };
+    },
+    tenantId,
+    "Date DESC",
+    options,
+  );
+}
+
+export async function fetchBatchPayments(
+  tenantId: string,
+  options: FetchPagedOptions = {},
+): Promise<PagedResult<XeroBatchPayment>> {
+  return fetchPaged<XeroBatchPayment>(
+    "/BatchPayments",
+    "BatchPayments",
+    (body) => {
+      const p = BatchPaymentsResponse.safeParse(body);
+      return p.success
+        ? { success: true, items: p.data.BatchPayments }
+        : { success: false, detail: issues(p.error) };
+    },
+    tenantId,
+    "Date DESC",
+    options,
+  );
+}
+
+export async function fetchPrepayments(
+  tenantId: string,
+  options: FetchPagedOptions = {},
+): Promise<PagedResult<XeroUnallocatedCredit>> {
+  return fetchPaged<XeroUnallocatedCredit>(
+    "/Prepayments",
+    "Prepayments",
+    (body) => {
+      const p = PrepaymentsResponse.safeParse(body);
+      return p.success
+        ? { success: true, items: p.data.Prepayments }
+        : { success: false, detail: issues(p.error) };
+    },
+    tenantId,
+    "Date DESC",
+    options,
+  );
+}
+
+export async function fetchOverpayments(
+  tenantId: string,
+  options: FetchPagedOptions = {},
+): Promise<PagedResult<XeroUnallocatedCredit>> {
+  return fetchPaged<XeroUnallocatedCredit>(
+    "/Overpayments",
+    "Overpayments",
+    (body) => {
+      const p = OverpaymentsResponse.safeParse(body);
+      return p.success
+        ? { success: true, items: p.data.Overpayments }
+        : { success: false, detail: issues(p.error) };
+    },
+    tenantId,
+    "Date DESC",
+    options,
+  );
 }
 
 // --- helpers ----------------------------------------------------------------

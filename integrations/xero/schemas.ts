@@ -181,3 +181,117 @@ export type XeroBankTransaction = z.infer<typeof XeroBankTransaction>;
 export const BankTransactionsResponse = z
   .object({ BankTransactions: z.array(XeroBankTransaction).default([]) })
   .passthrough();
+
+/**
+ * The payment family: four endpoints behind one scope (`accounting.payments.read`).
+ *
+ * Modelled from Xero's documented field lists, NOT from a survey of JENKI's data — the grant
+ * did not hold the scope when these were written, so all four returned 401. `.passthrough()`
+ * keeps anything unmodelled, so the survey can still reveal fields worth lifting (exactly how
+ * `LineItems.Description` was found on bank transactions, after months of reading `Reference`).
+ *
+ * Treat the DISPLAY choices built on these as provisional until that survey runs.
+ */
+
+/** Which endpoint a record came from. Kept on the record: completeness is per-source. */
+export const PAYMENT_SOURCES = ["PAYMENT", "BATCH_PAYMENT", "PREPAYMENT", "OVERPAYMENT"] as const;
+export type PaymentSource = (typeof PAYMENT_SOURCES)[number];
+
+const XeroInvoiceRef = z
+  .object({
+    InvoiceID: z.string().optional(),
+    InvoiceNumber: z.string().optional(),
+    Contact: XeroContact.optional(),
+  })
+  .passthrough();
+
+const XeroAccountRef = z
+  .object({
+    AccountID: z.string().optional(),
+    Code: z.string().optional(),
+    Name: z.string().optional(),
+  })
+  .passthrough();
+
+/** GET /Payments — a payment matched against an invoice or bill. */
+export const XeroPayment = z
+  .object({
+    PaymentID: z.string(),
+    /** ACCRECPAYMENT = money in, ACCPAYPAYMENT = money out, plus prepayment/overpayment kinds. */
+    PaymentType: z.string().optional(),
+    Status: z.string().optional(),
+    Date: XeroDate.optional(),
+    Reference: z.string().optional(),
+    Amount: z.number().optional(),
+    CurrencyRate: z.number().optional(),
+    IsReconciled: z.boolean().optional(),
+    Invoice: XeroInvoiceRef.optional(),
+    Account: XeroAccountRef.optional(),
+    BatchPaymentID: z.string().optional(),
+    UpdatedDateUTC: XeroDate.optional(),
+  })
+  .passthrough();
+export type XeroPayment = z.infer<typeof XeroPayment>;
+
+export const PaymentsResponse = z
+  .object({ Payments: z.array(XeroPayment).default([]) })
+  .passthrough();
+
+/** GET /BatchPayments — a batch (e.g. a supplier run) wrapping many payments. */
+export const XeroBatchPayment = z
+  .object({
+    BatchPaymentID: z.string(),
+    /** PAYBATCH = money out, RECBATCH = money in. */
+    Type: z.string().optional(),
+    Status: z.string().optional(),
+    Date: XeroDate.optional(),
+    Reference: z.string().optional(),
+    Particulars: z.string().optional(),
+    Narrative: z.string().optional(),
+    Details: z.string().optional(),
+    Amount: z.number().optional(),
+    IsReconciled: z.boolean().optional(),
+    Account: XeroAccountRef.optional(),
+    Payments: z.array(XeroPayment).optional(),
+    UpdatedDateUTC: XeroDate.optional(),
+  })
+  .passthrough();
+export type XeroBatchPayment = z.infer<typeof XeroBatchPayment>;
+
+export const BatchPaymentsResponse = z
+  .object({ BatchPayments: z.array(XeroBatchPayment).default([]) })
+  .passthrough();
+
+/**
+ * GET /Prepayments and GET /Overpayments — real cash in the bank not yet matched to an invoice.
+ *
+ * `RemainingCredit` is the field that matters for a cash position: the unallocated portion.
+ * Same shape for both endpoints, so one schema serves each.
+ */
+export const XeroUnallocatedCredit = z
+  .object({
+    PrepaymentID: z.string().optional(),
+    OverpaymentID: z.string().optional(),
+    Type: z.string().optional(),
+    Status: z.string().optional(),
+    Date: XeroDate.optional(),
+    Reference: z.string().optional(),
+    Contact: XeroContact.optional(),
+    CurrencyCode: z.string().optional(),
+    SubTotal: z.number().optional(),
+    TotalTax: z.number().optional(),
+    Total: z.number().optional(),
+    /** The portion not yet applied to an invoice — the cash-relevant number. */
+    RemainingCredit: z.number().optional(),
+    UpdatedDateUTC: XeroDate.optional(),
+  })
+  .passthrough();
+export type XeroUnallocatedCredit = z.infer<typeof XeroUnallocatedCredit>;
+
+export const PrepaymentsResponse = z
+  .object({ Prepayments: z.array(XeroUnallocatedCredit).default([]) })
+  .passthrough();
+
+export const OverpaymentsResponse = z
+  .object({ Overpayments: z.array(XeroUnallocatedCredit).default([]) })
+  .passthrough();

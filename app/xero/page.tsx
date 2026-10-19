@@ -163,6 +163,14 @@ function Snapshot({ snapshot }: { snapshot: XeroSnapshot }) {
   const { organisation, accounts, commitments, bankTransactions } = snapshot;
   const outstanding = outstandingByDirection(commitments.items);
   const failures = [...accounts.failures, ...commitments.failures, ...bankTransactions.failures];
+  // ANY missing scope prompts, not just the bank one.
+  //
+  // The guard used to check `accounting.banktransactions.read` alone. When
+  // `accounting.payments.read` was added on 22 Oct, `missingScopes` correctly reported it and
+  // the screen said nothing at all — so the operator had no way to know a re-authorisation was
+  // needed, and had to be told out of band. A guard that only notices the scope it was written
+  // for is a guard that silently stops working the next time one is added.
+  const needsReconsent = snapshot.missingScopes.length > 0;
   const needsBankScope = snapshot.missingScopes.includes("accounting.banktransactions.read");
 
   return (
@@ -272,18 +280,33 @@ function Snapshot({ snapshot }: { snapshot: XeroSnapshot }) {
         ) : null}
       </Card>
 
-      {needsBankScope ? (
-        <Notice tone="info" title="Re-authorise to include bank transactions">
+      {needsReconsent ? (
+        <Notice tone="info" title="Re-authorise to include everything we can now read">
           <p>
-            This connection was authorised before <code>accounting.banktransactions.read</code>{" "}
-            was requested. Xero does not add a scope to an existing consent, so the bank
-            transaction list stays empty until you disconnect and connect again.
+            This connection was authorised before some of the permissions we now request. Xero
+            never adds a scope to an existing consent, so the data behind these stays
+            unavailable until you re-authorise:
           </p>
+          <ul className="mt-2 list-disc space-y-1 pl-5">
+            {snapshot.missingScopes.map((scope) => (
+              <li key={scope}>
+                <code>{scope}</code>
+                {scope === "accounting.payments.read" ? (
+                  <> — payments, batch payments, prepayments and overpayments</>
+                ) : null}
+                {scope === "accounting.banktransactions.read" ? (
+                  <> — bank transactions</>
+                ) : null}
+              </li>
+            ))}
+          </ul>
           <div className="mt-4">
             <ConnectLink label="Re-authorise" />
           </div>
         </Notice>
-      ) : (
+      ) : null}
+
+      {needsBankScope ? null : (
         <Card
           title="Bank transactions"
           subtitle="Xero's ledger record of money through the bank — not a live bank feed. RECEIVE = in · SPEND = out."

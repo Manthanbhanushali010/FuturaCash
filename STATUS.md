@@ -43,10 +43,17 @@ Finish the Xero data foundation (core cash-flow endpoints) before building the f
   **NEXT STEP IS LUKE RE-AUTHORISING.** No normaliser or display exists yet — re-consenting
   does not make a Payments table appear. After he consents: survey the real payloads, then
   scope the build.
-  **Note: `/xero` does NOT prompt him.** The re-consent guard checks only
-  `accounting.banktransactions.read`, which he already holds, so `missingScopes` now contains
-  the payments scope and nothing on screen says so. He has to be told out of band. Worth
-  generalising the guard to any missing scope before a fourth scope is ever added.
+  ~~`/xero` does NOT prompt him.~~ **FIXED 2026-10-20.** The guard now prompts on ANY missing
+  scope and names each one, so the screen asks for the re-authorisation instead of it having to
+  be relayed. Verified Luke's grant on 2026-10-20: still 6 Sep, `accounting.payments.read`
+  **not granted** — so all four endpoints still 401.
+  **Fetch + schema + normalise layer is BUILT** (2026-10-20): `fetchPayments`,
+  `fetchBatchPayments`, `fetchPrepayments`, `fetchOverpayments`, all paginated with truncation
+  flags, normalising into `NormalisedProviderPayment` tagged with its `source` endpoint.
+  **Built from Xero's documented fields, not from a survey** — the grant had no scope, so no
+  payload could be inspected. Schemas use `.passthrough()`, so the survey can still reveal
+  fields worth lifting. **No display is wired up, and no `readXeroSnapshot` call is made** —
+  that waits on the survey, deliberately.
 - ~~Bank-transaction truncation~~ **IN PRODUCTION 2026-10-22, verified live.** Bank
   transactions read jumped 200 → **1000**, and the slice notice is **FIRING** — JENKI holds more
   than 1,000, so the honest answer is now on screen. Expect it to fire permanently: at ~14
