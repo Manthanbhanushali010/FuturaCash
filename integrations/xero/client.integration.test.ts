@@ -7,6 +7,7 @@ import {
   fetchInvoices,
   getValidAccessToken,
 } from "./client";
+import { XERO_SCOPES } from "./config";
 import { readXeroSnapshot } from "./index";
 import { setXeroTokenStore, type XeroTokenState, type XeroTokenStore } from "./tokens";
 
@@ -358,10 +359,10 @@ describe("fetchBankTransactions", () => {
     })) };
     stubFetch((url) => (url.includes("/BankTransactions") ? { body: full } : defaultHandler(url)));
 
-    const rows = await fetchBankTransactions(TENANT, { maxPages: 3 });
+    const { transactions } = await fetchBankTransactions(TENANT, { maxPages: 3 });
     const pages = calls.filter((c) => c.url.includes("/BankTransactions"));
     expect(pages).toHaveLength(3);
-    expect(rows).toHaveLength(300);
+    expect(transactions).toHaveLength(300);
     // The bound exists so one page load cannot burn the 5,000/day budget.
     expect(pages.map((c) => new URL(c.url).searchParams.get("page"))).toEqual(["1", "2", "3"]);
   });
@@ -546,5 +547,84 @@ describe("overdue invoices survive the page bound", () => {
     const { truncated } = await fetchInvoices(TENANT);
     // 10 full pages means Xero had an 11th. A bigger bound is not a complete one.
     expect(truncated).toBe(true);
+  });
+});
+
+describe("bank-transaction truncation is reported", () => {
+  const txn = (n: number) => ({
+    BankTransactionID: `bt-${n}`, Type: "SPEND", Status: "AUTHORISED",
+    CurrencyCode: "GBP", Total: 1,
+    LineItems: [{ Description: `line ${n}`, LineAmount: 1 }],
+  });
+
+  it("defaults to 10 pages, matching invoices", async () => {
+    const full = { BankTransactions: Array.from({ length: 100 }, (_, i) => txn(i)) };
+    stubFetch((url) => (url.includes("/BankTransactions") ? { body: full } : defaultHandler(url)));
+    const { transactions } = await fetchBankTransactions(TENANT);
+    expect(calls.filter((c) => c.url.includes("/BankTransactions"))).toHaveLength(10);
+    expect(transactions).toHaveLength(1000);
+  });
+
+  it("reports truncated when the bound is hit with a full page", async () => {
+    // The defect this fixes: at 2 pages JENKI's 200 rows covered ~14 days and the screen said
+    // nothing. The cap is on ROWS, so the window narrows as the business gets busier.
+    const full = { BankTransactions: Array.from({ length: 100 }, (_, i) => txn(i)) };
+    stubFetch((url) => (url.includes("/BankTransactions") ? { body: full } : defaultHandler(url)));
+    const { truncated } = await fetchBankTransactions(TENANT, { maxPages: 2 });
+    expect(truncated).toBe(true);
+  });
+
+  it("reports NOT truncated on a short final page", async () => {
+    let call = 0;
+    stubFetch((url) => {
+      if (!url.includes("/BankTransactions")) return defaultHandler(url);
+      call += 1;
+      return call === 1
+        ? { body: { BankTransactions: Array.from({ length: 100 }, (_, i) => txn(i)) } }
+        : { body: { BankTransactions: [txn(999)] } };
+    });
+    const { transactions, truncated } = await fetchBankTransactions(TENANT, { maxPages: 5 });
+    expect(transactions).toHaveLength(101);
+    expect(truncated).toBe(false);
+  });
+
+  it("reports NOT truncated for a single short page", async () => {
+    stubFetch(defaultHandler);
+    const { truncated } = await fetchBankTransactions(TENANT);
+    expect(truncated).toBe(false);
+  });
+
+  it("carries the flag onto the snapshot", async () => {
+    // The grant must actually hold the bank scope, or readXeroSnapshot skips the fetch
+    // entirely rather than spending a call on a guaranteed 401 — which is the behaviour the
+    // next test pins.
+    setXeroTokenStore(
+      new MemoryStore(connectedState({ scope: XERO_SCOPES.join(" ") })),
+    );
+    const full = { BankTransactions: Array.from({ length: 100 }, (_, i) => txn(i)) };
+    stubFetch((url) => (url.includes("/BankTransactions") ? { body: full } : defaultHandler(url)));
+    const snapshot = await readXeroSnapshot();
+    expect(snapshot.bankTransactionsTruncated).toBe(true);
+  });
+
+  it("skips the fetch entirely when the grant lacks the bank scope", async () => {
+    // A grant made before the scope was added cannot read the endpoint; calling anyway would
+    // spend an API call to earn a 401 and report it as a Xero outage.
+    const full = { BankTransactions: Array.from({ length: 100 }, (_, i) => txn(i)) };
+    stubFetch((url) => (url.includes("/BankTransactions") ? { body: full } : defaultHandler(url)));
+    const snapshot = await readXeroSnapshot();   // beforeEach grant has invoices scope only
+    expect(calls.filter((c) => c.url.includes("/BankTransactions"))).toHaveLength(0);
+    expect(snapshot.bankTransactions.items).toHaveLength(0);
+    expect(snapshot.bankTransactionsTruncated).toBe(false);
+    expect(snapshot.missingScopes).toContain("accounting.banktransactions.read");
+  });
+
+  it("sends no date filter — the window is the row cap, nothing else", async () => {
+    // Recorded because the 14-day window was twice mistaken for a separate date bound.
+    stubFetch(defaultHandler);
+    await fetchBankTransactions(TENANT);
+    const url = new URL(calls.find((c) => c.url.includes("/BankTransactions"))!.url);
+    expect([...url.searchParams.keys()].sort()).toEqual(["order", "page", "where"]);
+    expect(url.searchParams.get("where")).not.toContain("Date");
   });
 });

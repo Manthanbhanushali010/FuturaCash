@@ -10,6 +10,19 @@ import { XERO_SCOPES } from "./config";
 const ACCOUNTING_SCOPES = XERO_SCOPES.filter((scope) => scope.startsWith("accounting."));
 
 describe("XERO_SCOPES", () => {
+  it("requests accounting.payments.read, which unlocks four endpoints at once", () => {
+    // Payments, BatchPayments, Prepayments and Overpayments share one scope. Verified against
+    // Xero's scope documentation, not inferred from the endpoint names.
+    expect(XERO_SCOPES).toContain("accounting.payments.read");
+  });
+
+  it("does NOT request accounting.journals.read", () => {
+    // /Journals is gated behind Xero's Advanced tier (~$1,445 AUD/month) plus a security
+    // assessment and use-case approval. Adding the scope would not unlock it, and asking for a
+    // permission we cannot use costs a re-consent for nothing.
+    expect(XERO_SCOPES).not.toContain("accounting.journals.read");
+  });
+
   it("requests accounting.banktransactions.read for GET /BankTransactions", () => {
     // Verified against Xero's granular-scopes documentation, not inferred from the endpoint
     // name. A wrong string here fails at the authorize endpoint with invalid_scope, after a

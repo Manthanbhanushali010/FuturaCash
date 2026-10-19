@@ -320,6 +320,18 @@ function Snapshot({ snapshot }: { snapshot: XeroSnapshot }) {
               ))}
             </Table>
           )}
+          {snapshot.bankTransactionsTruncated ? (
+            <div className="px-5 pt-4">
+              <Notice tone="error" title="This is a recent slice, not the full history">
+                <p>
+                  Xero holds more bank transactions than this read returned, so what is listed
+                  below is the most recent portion rather than everything. Nothing here is
+                  summed into a total, so no figure is wrong — but do not read the absence of an
+                  older transaction as evidence it does not exist.
+                </p>
+              </Notice>
+            </div>
+          ) : null}
           {bankTransactions.items.length > MAX_ROWS ? (
             <p className="px-5 py-3 text-xs text-muted">
               Showing the first {MAX_ROWS} of {bankTransactions.items.length}.

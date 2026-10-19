@@ -27,6 +27,7 @@ export const XERO_API_BASE = "https://api.xero.com/api.xro/2.0";
  *   accounting.invoices.read  → GET /Invoices (sales invoices and bills)
  *   accounting.contacts.read  → the Contact on each invoice (counterparty names)
  *   accounting.banktransactions.read → GET /BankTransactions
+ *   accounting.payments.read  → GET /Payments, /BatchPayments, /Prepayments, /Overpayments
  *
  * NOTE on bank transactions: these are Xero's record of money in and out of a bank account
  * as entered or reconciled in the LEDGER. They are not a bank feed. The live feed comes from
@@ -46,6 +47,23 @@ export const XERO_SCOPES = [
   "accounting.invoices.read",
   "accounting.contacts.read",
   "accounting.banktransactions.read",
+  // ONE scope covers four endpoints: /Payments, /BatchPayments, /Prepayments, /Overpayments.
+  //
+  // This is the structural fix for "payments are completely missing". All four returned
+  // 401 AuthorizationUnsuccessful on 2026-10-01 — not 404, not an empty array. The endpoints
+  // existed and answered; we had simply never asked for permission. /BankTransactions only
+  // ever carried direct bank-level entries, so a payment matched against an invoice was never
+  // going to appear there at any page depth.
+  //
+  // Overpayments and Prepayments come free in the same grant and matter for accuracy: they are
+  // real cash already in the bank, not yet matched to an invoice. Omitting them understates the
+  // position in exactly the case that reads as "why doesn't this match my account".
+  //
+  // accounting.journals.read is deliberately NOT requested. /Journals now sits behind Xero's
+  // Advanced tier (~$1,445 AUD/month) plus a security assessment and use-case approval, so it
+  // is a commercial decision rather than a scope to add. ManualJournals is free at every tier
+  // under its own scope if a reconciliation check is needed sooner.
+  "accounting.payments.read",
 ] as const;
 
 /** Xero: 60 calls/min and 5,000/day per org. Chart of accounts barely changes — cache it. */

@@ -105,6 +105,13 @@ export interface XeroSnapshot {
    */
   invoicesTruncated: boolean;
   bankTransactions: NormalisationResult<NormalisedBankTransaction>;
+  /**
+   * True when Xero holds more bank transactions than the bounded read returned.
+   *
+   * Unlike the invoice totals, nothing on this screen sums bank transactions — so the risk is
+   * not a wrong figure but a wrong impression: a 14-day slice looking like a full history.
+   */
+  bankTransactionsTruncated: boolean;
   /** Scopes the code needs that this grant does not have. Non-empty means re-consent. */
   missingScopes: string[];
   accountsFromCache: boolean;
@@ -137,7 +144,9 @@ export async function readXeroSnapshot(): Promise<XeroSnapshot> {
   const [accountsPage, invoicesResult, bankTransactions] = await Promise.all([
     fetchChartOfAccounts(tenantId),
     fetchInvoices(tenantId),
-    needsBankScope ? Promise.resolve([]) : fetchBankTransactions(tenantId),
+    needsBankScope
+      ? Promise.resolve({ transactions: [], truncated: false })
+      : fetchBankTransactions(tenantId),
   ]);
 
   const activeConnection = state.connections.find(
@@ -160,9 +169,10 @@ export async function readXeroSnapshot(): Promise<XeroSnapshot> {
     accounts: normaliseAccounts(accountsPage.accounts),
     commitments: normaliseInvoices(invoicesResult.invoices, { fallbackCurrency: baseCurrency }),
     invoicesTruncated: invoicesResult.truncated,
-    bankTransactions: normaliseBankTransactions(bankTransactions, {
+    bankTransactions: normaliseBankTransactions(bankTransactions.transactions, {
       fallbackCurrency: baseCurrency,
     }),
+    bankTransactionsTruncated: bankTransactions.truncated,
     missingScopes: absent,
     accountsFromCache: accountsPage.cached,
   };

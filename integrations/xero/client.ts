@@ -396,6 +396,20 @@ export async function fetchInvoices(
   return { invoices, truncated };
 }
 
+export interface FetchBankTransactionsResult {
+  transactions: XeroBankTransaction[];
+  /**
+   * True when the page bound was reached with more still available.
+   *
+   * Invoices got this flag in spec-1b; bank transactions never did, and the cost was concrete.
+   * At the old bound of 2 pages JENKI's 200 rows covered about 14 days — roughly 14
+   * transactions a day — and the screen presented that as the whole picture. Note the cap is on
+   * ROWS, not days, so the visible window silently narrows as the business gets busier: a
+   * seasonal spike in card takings shortens the history with no code change at all.
+   */
+  truncated: boolean;
+}
+
 export interface FetchBankTransactionsOptions {
   /** Xero statuses to include. Defaults to AUTHORISED — the ones that really moved money. */
   statuses?: readonly string[];
@@ -414,10 +428,13 @@ export interface FetchBankTransactionsOptions {
 export async function fetchBankTransactions(
   tenantId: string,
   options: FetchBankTransactionsOptions = {},
-): Promise<XeroBankTransaction[]> {
+): Promise<FetchBankTransactionsResult> {
   const statuses = options.statuses ?? ["AUTHORISED"];
-  const maxPages = options.maxPages ?? 2;
+  // 10 pages, matching fetchInvoices. Two was measurably too few — see the note on
+  // FetchBankTransactionsResult.truncated.
+  const maxPages = options.maxPages ?? 10;
   const transactions: XeroBankTransaction[] = [];
+  let truncated = false;
   const where = statuses.map((status) => `Status=="${status}"`).join(" OR ");
 
   for (let page = 1; page <= maxPages; page += 1) {
@@ -430,10 +447,12 @@ export async function fetchBankTransactions(
       throw new XeroApiError(200, "/BankTransactions", `unexpected payload: ${issues(parsed.error)}`);
     }
     transactions.push(...parsed.data.BankTransactions);
-    if (parsed.data.BankTransactions.length < 100) break; // short page — no more to fetch
+    if (parsed.data.BankTransactions.length < 100) break; // short page — the set is complete
+    // A full page on the final iteration means Xero had more and we stopped asking.
+    if (page === maxPages) truncated = true;
   }
 
-  return transactions;
+  return { transactions, truncated };
 }
 
 // --- helpers ----------------------------------------------------------------

@@ -34,16 +34,16 @@ Finish the Xero data foundation (core cash-flow endpoints) before building the f
 
 ## Next up (not started)
 
-- **`accounting.payments.read`** — the structural fix for Luke's missing payments. All four
-  payment-family endpoints (`/Payments`, `/BatchPayments`, `/Prepayments`, `/Overpayments`)
-  returned **401 AuthorizationUnsuccessful** on 1 Oct: not empty, not 404 — unpermitted. One
-  scope covers all four. Requires another re-consent from Luke.
-  **`/Overpayments` and `/Prepayments` are free wins in the same deploy** — same scope, same
-  pull, no extra request. They hold real cash in the bank not yet matched to an invoice, so
-  omitting them understates the position in exactly the case that reads as "why don't these
-  numbers match the account".
-- **Bank-transaction truncation** — `fetchBankTransactions` is still `maxPages ?? 2` with no
-  truncation flag. Invoices got the flag in spec-1b; bank transactions did not.
+- ~~`accounting.payments.read`~~ **ADDED 2026-10-19 (committed, not yet pushed).** Unlocks
+  `/Payments`, `/BatchPayments`, `/Prepayments`, `/Overpayments` — one scope, four endpoints.
+  `accounting.journals.read` deliberately NOT added: the Advanced-tier gate means the scope
+  would not unlock it, and asking for an unusable permission costs a re-consent for nothing.
+  **Still needs: push → Luke re-authorises → survey the real payloads → then build.** No
+  normaliser or display exists yet; re-consenting does not make a Payments table appear.
+- ~~Bank-transaction truncation~~ **FIXED 2026-10-19 (committed, not yet pushed).**
+  `fetchBankTransactions` now returns `{ transactions, truncated }` at `maxPages ?? 10`, and the
+  screen says plainly when the list is a recent slice rather than the full history. Previously
+  `maxPages ?? 2` with no flag. Invoices got the flag in spec-1b; bank transactions did not.
   **The "14-day window" is this same defect, not a separate one** (verified 2026-10-19: the
   fetch sends only `where`/`page`/`order`, no date filter at all). 200 rows ÷ ~14 txns/day ≈ 14
   days, so the window is arithmetic. Raising `maxPages` widens it proportionally — at 10 pages,
