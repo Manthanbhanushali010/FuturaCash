@@ -82,11 +82,37 @@ Finish the Xero data foundation (core cash-flow endpoints) before building the f
   endpoint: it is `GET /Accounts` filtered to `Type=BANK`, and that fetch has been live since
   Spec 1. `normalise.ts:192` sets `isBankAccount`, the page renders a `bank` pill. Live on
   production: 341 accounts read, 32 flagged as bank accounts.
-- Repeating invoices, Purchase orders (pending Luke), Credit notes
-- Enhance bucket: Contacts, Contact groups, Tracking categories (likely the answer to the
-  site/revenue-centre enrichment Luke wants — JENKI is multi-location; `Tracking` already
-  arrives on line items via `.passthrough()` and is never read), Linked transactions,
-  Organisation, Tax rates
+- **SCOPE AUDIT 2026-10-22 — all nine remaining endpoints are ALREADY AUTHORISED.** Probed
+  every one against JENKI's live connection with the existing 6 Sep grant: `RepeatingInvoices`,
+  `PurchaseOrders`, `CreditNotes`, `Contacts`, `ContactGroups`, `TrackingCategories`,
+  `LinkedTransactions`, `Organisation`, `TaxRates` — **all HTTP 200, none 401**. The eight
+  granted scopes are `openid profile email offline_access accounting.settings.read
+  accounting.invoices.read accounting.contacts.read accounting.banktransactions.read`.
+  **Nothing on this list needs another re-authorise from Luke.** Payments was the exception,
+  not the rule: it is the only family that needed a scope we lacked. Do not bundle any of
+  these into a future re-consent ask — they are already open.
+  Live record counts, so build effort tracks actual value:
+    - `CreditNotes` **1578** — the big one; cash-relevant, carries `RemainingCredit`
+    - `Contacts` **1785**
+    - `TaxRates` **27**
+    - `TrackingCategories` **2 categories / 30 options** (see the answered question below)
+    - `PurchaseOrders` **8** (priority still ambiguous — a Luke question, not a scope one)
+    - `RepeatingInvoices` **0**, `ContactGroups` **0**, `LinkedTransactions` **0**
+  **The three zero-row endpoints are authorised but UNSURVEYABLE** — no records means no field
+  shapes, so building them would be guessing from documentation, which is the exact position
+  the payment layer is in. Authorised is not the same as buildable. Defer them until JENKI
+  actually has rows, and check the count again before spending effort.
+- **`CreditNotes` strips `LineItems` unless you paginate** (verified 2026-10-22). `GET
+  /CreditNotes` with no `page` returns all 1578 records with `LineItems: []`; `GET
+  /CreditNotes?page=1` returns 100 records **with** line items populated. Same class of defect
+  as the `LineItems.Description` bug — the data is there, the request was wrong, and nothing
+  errors. **Always send `page`.** Line items carry `Tracking`, which is how site/revenue-centre
+  attribution actually reaches a credit note. Also from page 1: `Status` PAID=74 VOIDED=26 (so
+  VOIDED must be filtered or credits are overstated), `Type` ACCRECCREDIT=63 ACCPAYCREDIT=37
+  (direction matters, exactly as invoices), and `RemainingCredit > 0` on **26 of 100** — real
+  unallocated cash, not a rounding curiosity. Assume the same no-page stripping applies to
+  `Contacts` until proven otherwise.
+- Enhance bucket: Organisation (already built), Tax rates, Contacts
 - `CNY` is unsupported in `core/money.ts` — one JENKI transaction is excluded from totals and
   reported as a normalisation failure. `core/` is protected, so this needs a deliberate call.
 - The forecast engine itself — not started. Everything above is still data foundation.
@@ -131,13 +157,28 @@ a cost/approval reason neither of us knew until this was checked.
 - Does money move between JENKI's own bank accounts? If so `/BankTransfers` matters — with six
   locations, ignoring it could make individual account balances wrong even when the consolidated
   position is right. Ask Luke rather than assuming.
-- **Does JENKI deal in foreign currency routinely, or was the CNY transaction a one-off?** One
+- **Does JENKI deal in foreign currency routinely, or was the CNY transaction a one-off?**
+  **Strong new evidence 2026-10-22: routinely.** Six of JENKI's eight purchase orders are
+  **USD**, not GBP, at a stored `CurrencyRate` (e.g. 1.35916) — so foreign currency is a
+  standing part of procurement, not an anomaly. USD is already in `SUPPORTED_CURRENCIES`
+  (GBP/EUR/USD) so nothing is blocked today, but it means the CNY failure is the leading edge
+  of a pattern rather than a stray row, and `CurrencyRate` will have to be modelled for any
+  figure that consolidates to GBP. Still ask Luke, but the answer is now "probably yes". One
   CNY-denominated transaction is currently excluded from the totals and reported as a
   normalisation failure. `Currencies` had been triaged as "probably irrelevant for a UK matcha
   bar chain" — this is evidence against that. Ask Luke rather than guessing; the answer decides
   whether `core/money.ts` needs one currency added or a general multi-currency approach.
-- Does JENKI use Xero Tracking Categories? (Settings → Advanced → Tracking categories.) If yes,
-  "site" and "revenue centre" are a small build. If the list is empty, the data does not exist.
+- ~~Does JENKI use Xero Tracking Categories?~~ **ANSWERED 2026-10-22 — YES, and it is already
+  authorised.** Surveyed live: two ACTIVE categories. **"Site"** with 20 options (Battersea
+  Power Station, Berwick St (Soho), Borough Market, Canary Wharf, Covent Garden, Fitzrovia, Gr
+  Portland St, Liverpool Broad Street, Marylebone, Selfridges, Spitalfields, St Pauls
+  (Paternoster), plus Amazon Seller, CPU, Events, Head Office, Online, Warehouse, Wholesale)
+  and **"Revenue Centre"** with 10 options (Bars, CPU, Event, Head Office, Licensing, Media,
+  Online, Wholesale, + two retired). So the site/revenue-centre enrichment Luke wants is a
+  build, not a data-gathering exercise. Two caveats from the real data: there are **more than
+  six sites** — twelve-ish retail locations plus wholesale/online/events channels, so "six
+  London matcha bars" understates the dimensionality; and several options are prefixed
+  `DO NOT USE\old:`, which any grouping must exclude or it will double-count history.
 
 ## Companion docs
 
