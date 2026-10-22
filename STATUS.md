@@ -43,10 +43,20 @@ Finish the Xero data foundation (core cash-flow endpoints) before building the f
   **NEXT STEP IS LUKE RE-AUTHORISING.** No normaliser or display exists yet — re-consenting
   does not make a Payments table appear. After he consents: survey the real payloads, then
   scope the build.
-  ~~`/xero` does NOT prompt him.~~ **FIXED 2026-10-20.** The guard now prompts on ANY missing
-  scope and names each one, so the screen asks for the re-authorisation instead of it having to
-  be relayed. Verified Luke's grant on 2026-10-20: still 6 Sep, `accounting.payments.read`
-  **not granted** — so all four endpoints still 401.
+  ~~`/xero` does NOT prompt him.~~ **FIXED, AND VERIFIED LIVE 2026-10-22** (`ac66cc3`). The
+  guard prompts on ANY missing scope and names each one, so the screen asks for the
+  re-authorisation instead of it having to be relayed. **Confirmed on production itself**, not
+  local dev: `/xero` renders "Re-authorise to include everything we can now read" listing
+  exactly one scope, `accounting.payments.read`, with its description, and the
+  bank-transactions card still renders below it — which is the correct combination for a grant
+  missing only payments. Pre-fix those two were mutually exclusive branches.
+  Luke's grant is still 6 Sep and `accounting.payments.read` is **not granted**, so all four
+  endpoints still 401.
+  The guard had ONE weak assertion behind it before this; `integrations/xero/missing-scopes.test.ts`
+  now pins it with 16 tests, including `it.each(XERO_SCOPES)` so a tenth scope is covered the
+  day it is added. The RENDER is still not covered by a test — no DOM environment in
+  devDependencies and no vitest config — so the live check above is the only proof of the
+  rendering path, and re-doing it is the right move after any change to `app/xero/page.tsx`.
   **Fetch + schema + normalise layer is BUILT** (2026-10-20): `fetchPayments`,
   `fetchBatchPayments`, `fetchPrepayments`, `fetchOverpayments`, all paginated with truncation
   flags, normalising into `NormalisedProviderPayment` tagged with its `source` endpoint.

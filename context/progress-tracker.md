@@ -83,6 +83,12 @@ Update this file after every meaningful implementation change.
 
 ## In Progress
 
+- **Luke to re-authorise the Xero connection** (as of 2026-10-22). `accounting.payments.read`
+  is requested in production but his grant predates it, so `/Payments`, `/BatchPayments`,
+  `/Prepayments` and `/Overpayments` all 401. The fetch/schema/normalise layer is built but
+  deliberately not wired into `readXeroSnapshot` and has no display: those decisions wait on a
+  survey of the real payloads, which cannot happen until he consents. `/xero` now asks him
+  directly — verified rendering on production, not local dev.
 - **Spec 1b live verification.** Luke to compare both totals against Xero's own Aged
   Receivables and Aged Payables summaries for JENKI — the only external ground truth
   available, and his books.
@@ -279,6 +285,18 @@ Update this file after every meaningful implementation change.
   `src/routes/index.tsx` carries the design, and it imports nothing but `lucide-react` and
   one PNG. Taking the build config or the dependency tree would have imported a second
   framework's conventions into the app for no benefit; the conversion cost one dependency.
+
+- **A guard that names its trigger stops working silently** (2026-10-22) — the /xero
+  re-consent prompt checked `accounting.banktransactions.read` by name. When
+  `accounting.payments.read` was added, `missingScopes` reported it correctly and the screen
+  said nothing, so the ask had to be relayed by hand. The prompt now derives entirely from
+  `missingScopes()`, which filters `XERO_SCOPES` — the same constant the authorize URL is built
+  from — so a scope becomes promptable by being requested, with no second place to update. The
+  two scope literals left in the JSX only append a human-readable description and cannot drop
+  an item from the list. Pinned by `it.each(XERO_SCOPES)` rather than by case, and the
+  generalisation was confirmed by mutation: reverting to the hardcoded form fails 12 of 16.
+  The render itself has no test — there is no DOM environment in devDependencies — so it is
+  verified against production directly, which is the same standard applied to the scope deploy.
 
 ## Session Notes
 
