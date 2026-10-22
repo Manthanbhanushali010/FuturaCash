@@ -10,10 +10,13 @@ import {
 import type { XeroBatchPayment, XeroPayment, XeroUnallocatedCredit } from "./schemas";
 
 /**
- * The payment family. Built from Xero's documented fields, NOT from a survey of JENKI's data —
- * the grant did not hold `accounting.payments.read` when these were written, so all four
- * endpoints returned 401. Display choices downstream are provisional until that survey runs;
- * the behaviours asserted here are contract-level and should hold regardless.
+ * The payment family.
+ *
+ * Originally written from Xero's documented fields, because the grant did not yet hold
+ * `accounting.payments.read` and all four endpoints returned 401. JENKI's connection was
+ * re-authorised on 2026-10-22 and all four surveyed live; the assertions below the
+ * "corrected by the live survey" heading replace documentation with measurement, and each one
+ * pins a defect the documentation-based version actually had.
  */
 
 const options = { fallbackCurrency: "GBP" as const };
@@ -139,5 +142,274 @@ describe("batches collect failures rather than dropping them", () => {
     );
     expect(result.items).toHaveLength(0);
     expect(result.failures[0]?.reason).toMatch(/missing both PrepaymentID and OverpaymentID/);
+  });
+});
+
+// ===========================================================================================
+// Corrected by the live survey (2026-10-22). Each block below pins a defect that the
+// documentation-based version of this layer actually had.
+// ===========================================================================================
+
+/** A live-shaped payment, read newest-first — where BatchPaymentID IS populated. */
+const LIVE_PAYMENT: XeroPayment = {
+  PaymentID: "82be702a-fd1d-429b-8d3a-b10db62c7274",
+  PaymentType: "ACCRECPAYMENT",
+  Status: "AUTHORISED",
+  Amount: 49.98,
+  BankAmount: 49.98,
+  CurrencyRate: 1,
+  IsReconciled: true,
+  Account: { AccountID: "02f08e19", Code: "616" },
+  Invoice: { Type: "ACCREC", InvoiceID: "8e2d0a70", InvoiceNumber: "1233" },
+  BatchPaymentID: "398a49ef-a1b4-4e3b-be76-20682d10d932",
+} as XeroPayment;
+
+/** A live-shaped batch: TotalAmount, never Amount. */
+const LIVE_BATCH: XeroBatchPayment = {
+  BatchPaymentID: "b1b51349",
+  Type: "PAYBATCH",
+  Status: "AUTHORISED",
+  TotalAmount: 623,
+  IsReconciled: true,
+  ReconciledStatementLineId: "becbe490-ec60-4fcf-9dc2-51d74dffa94f",
+  Payments: [
+    { PaymentID: "52e731c6", Amount: 382.5 },
+    { PaymentID: "4405533c", Amount: 2600.4 },
+  ],
+} as XeroBatchPayment;
+
+const LIVE_OVERPAYMENT: XeroUnallocatedCredit = {
+  OverpaymentID: "91a4948f",
+  Type: "ACCPAYOVERPAYMENT",
+  Status: "AUTHORISED",
+  CurrencyCode: "GBP",
+  Total: 64.99,
+  RemainingCredit: 64.99,
+} as XeroUnallocatedCredit;
+
+describe("BatchPayment total — TotalAmount, not Amount", () => {
+  // The original read `batch.Amount`, which live batches never send. toMoney(undefined)
+  // returns zero rather than throwing, so all 1,421 of JENKI's batches would have normalised
+  // to GBP 0.00 and summed to nothing, with no error anywhere.
+  it("reads TotalAmount, the field Xero actually sends", () => {
+    expect(normaliseBatchPayment(LIVE_BATCH, options).amount).toEqual({
+      minor: 62300,
+      currency: "GBP",
+    });
+  });
+
+  it("does NOT silently normalise a live batch to zero", () => {
+    expect(normaliseBatchPayment(LIVE_BATCH, options).amount.minor).not.toBe(0);
+  });
+
+  it("still accepts Amount as a fallback, for an org that sends it", () => {
+    const legacy = { BatchPaymentID: "b", Type: "PAYBATCH", Amount: 10 } as XeroBatchPayment;
+    expect(normaliseBatchPayment(legacy, options).amount).toEqual({ minor: 1000, currency: "GBP" });
+  });
+
+  it("prefers TotalAmount when both are present", () => {
+    const both = { ...LIVE_BATCH, Amount: 1 } as XeroBatchPayment;
+    expect(normaliseBatchPayment(both, options).amount).toEqual({ minor: 62300, currency: "GBP" });
+  });
+
+  it("FAILS LOUDLY when neither is present, rather than becoming zero", () => {
+    const neither = { BatchPaymentID: "b", Type: "PAYBATCH" } as XeroBatchPayment;
+    expect(() => normaliseBatchPayment(neither, options)).toThrow(
+      /neither TotalAmount nor Amount/,
+    );
+  });
+});
+
+describe("BankAmount — what actually hit the bank", () => {
+  it("carries BankAmount alongside Amount", () => {
+    const out = normalisePayment(LIVE_PAYMENT, options);
+    expect(out.amount).toEqual({ minor: 4998, currency: "GBP" });
+    expect(out.bankAmount).toEqual({ minor: 4998, currency: "GBP" });
+  });
+
+  it("keeps them distinct when a currency rate makes them diverge", () => {
+    // Amount is in the invoice's currency, BankAmount in the bank account's. A cash position
+    // has to use BankAmount, because that is the figure the statement will show.
+    const fx = { ...LIVE_PAYMENT, Amount: 100, BankAmount: 73.58, CurrencyRate: 1.3591 };
+    const out = normalisePayment(fx as XeroPayment, options);
+    expect(out.amount).toEqual({ minor: 10000, currency: "GBP" });
+    expect(out.bankAmount).toEqual({ minor: 7358, currency: "GBP" });
+  });
+
+  it("falls back to Amount rather than reporting zero when BankAmount is absent", () => {
+    const noBank = { PaymentID: "p", PaymentType: "ACCRECPAYMENT", Amount: 12.34 };
+    expect(normalisePayment(noBank as XeroPayment, options).bankAmount).toEqual({
+      minor: 1234,
+      currency: "GBP",
+    });
+  });
+});
+
+describe("the payment<->batch join, which runs BOTH ways", () => {
+  /**
+   * This block nearly asserted the opposite. A survey of `/Payments` page 1 found
+   * BatchPaymentID on 0 of 100 records, so it was reported as a documentation-only field —
+   * but page 1 is JENKI's oldest payments, from before they used batches. Read newest-first
+   * it is on 200 of 200 as real GUIDs. The lesson is pinned here because the same trap
+   * produced the opposite wrong answer about the /Payments overlap: on this API, page 1 is
+   * the least representative sample available.
+   */
+  it("a payment names the batch it belongs to", () => {
+    expect(normalisePayment(LIVE_PAYMENT, options).batchExternalId).toBe(
+      "398a49ef-a1b4-4e3b-be76-20682d10d932",
+    );
+  });
+
+  it("reports null for a payment that belongs to no batch", () => {
+    const standalone = { PaymentID: "p", PaymentType: "ACCRECPAYMENT", Amount: 1 };
+    expect(normalisePayment(standalone as XeroPayment, options).batchExternalId).toBeNull();
+  });
+
+  it("a batch is not itself inside a batch", () => {
+    expect(normaliseBatchPayment(LIVE_BATCH, options).batchExternalId).toBeNull();
+  });
+
+  it("a batch names its member payments — the other direction of the same join", () => {
+    expect(normaliseBatchPayment(LIVE_BATCH, options).memberPaymentIds).toEqual([
+      "52e731c6",
+      "4405533c",
+    ]);
+  });
+
+  it("gives a dedupe key from either side of the /Payments overlap", () => {
+    // Batch members are ALSO individual /Payments records -- 3 of 3 sampled resolved from
+    // GET /Payments/{id}. Summing both endpoints double-counts. Either side can dedupe:
+    // expand the batch's membership, or filter payments that name a batch.
+    const ids = normaliseBatchPayment(LIVE_BATCH, options).memberPaymentIds;
+    expect(ids).toEqual(["52e731c6", "4405533c"]);
+    expect(normalisePayment(LIVE_PAYMENT, options).batchExternalId).not.toBeNull();
+  });
+
+  it("tolerates a batch whose members have no id", () => {
+    const anon = { ...LIVE_BATCH, Payments: [{ Amount: 1 }] } as XeroBatchPayment;
+    expect(normaliseBatchPayment(anon, options).memberPaymentIds).toEqual([]);
+  });
+
+  it("carries the reconciled statement line, present on 1,307 of 1,421", () => {
+    expect(normaliseBatchPayment(LIVE_BATCH, options).statementLineExternalId).toBe(
+      "becbe490-ec60-4fcf-9dc2-51d74dffa94f",
+    );
+  });
+});
+
+describe("amountIsLive — cancelled records keep their amounts", () => {
+  // 100 of 100 sampled DELETED payments carried a non-zero Amount, and roughly a fifth of an
+  // unfiltered /Payments read is DELETED. Summing without this counts cancelled money.
+  it("is true for an AUTHORISED payment", () => {
+    expect(normalisePayment(LIVE_PAYMENT, options).amountIsLive).toBe(true);
+  });
+
+  it("is false for a DELETED payment, which still reports its amount", () => {
+    const deleted = { ...LIVE_PAYMENT, Status: "DELETED", Amount: 250, BankAmount: 250 };
+    const out = normalisePayment(deleted as XeroPayment, options);
+    expect(out.amountIsLive).toBe(false);
+    // The figure is kept faithfully -- the flag says not to count it, not that it is absent.
+    expect(out.amount).toEqual({ minor: 25000, currency: "GBP" });
+  });
+
+  it("is false for a DELETED batch payment", () => {
+    const deleted = { ...LIVE_BATCH, Status: "DELETED" } as XeroBatchPayment;
+    expect(normaliseBatchPayment(deleted, options).amountIsLive).toBe(false);
+  });
+
+  it("is false for a VOIDED overpayment", () => {
+    const voided = { ...LIVE_OVERPAYMENT, Status: "VOIDED" } as XeroUnallocatedCredit;
+    expect(normaliseUnallocatedCredit(voided, "OVERPAYMENT", options).amountIsLive).toBe(false);
+  });
+
+  it("is TRUE for a PAID overpayment — the money did move, it is just fully applied", () => {
+    const paid = { ...LIVE_OVERPAYMENT, Status: "PAID", RemainingCredit: 0 };
+    const out = normaliseUnallocatedCredit(paid as XeroUnallocatedCredit, "OVERPAYMENT", options);
+    expect(out.amountIsLive).toBe(true);
+    expect(out.creditIsLive).toBe(false);
+  });
+});
+
+describe("creditIsLive — the VOIDED overpayment trap", () => {
+  // 64 of 64 VOIDED overpayments keep a non-zero RemainingCredit; 0 of 36 PAID do. Identical
+  // in shape to the VOIDED credit-note trap.
+  it("is true for an AUTHORISED overpayment with real remaining credit", () => {
+    const out = normaliseUnallocatedCredit(LIVE_OVERPAYMENT, "OVERPAYMENT", options);
+    expect(out.creditIsLive).toBe(true);
+    expect(out.remainingCredit).toEqual({ minor: 6499, currency: "GBP" });
+  });
+
+  it("is false for a VOIDED overpayment even though it reports remaining credit", () => {
+    const voided = { ...LIVE_OVERPAYMENT, Status: "VOIDED" } as XeroUnallocatedCredit;
+    const out = normaliseUnallocatedCredit(voided, "OVERPAYMENT", options);
+    expect(out.creditIsLive).toBe(false);
+    // Reported faithfully, so a cancelled credit with a stale balance stays visible as one.
+    expect(out.remainingCredit).toEqual({ minor: 6499, currency: "GBP" });
+  });
+
+  it("is false for a plain payment, which holds no unapplied credit", () => {
+    expect(normalisePayment(LIVE_PAYMENT, options).creditIsLive).toBe(false);
+  });
+
+  it("is false for a batch payment", () => {
+    expect(normaliseBatchPayment(LIVE_BATCH, options).creditIsLive).toBe(false);
+  });
+});
+
+describe("allocations and draw-down — was this credit consumed?", () => {
+  const allocated = {
+    ...LIVE_OVERPAYMENT,
+    Status: "PAID",
+    RemainingCredit: 0,
+    Allocations: [
+      {
+        AllocationID: "8977bb3f",
+        Amount: 146.53,
+        Invoice: { InvoiceID: "0bcec34b", InvoiceNumber: "402383299" },
+      },
+    ],
+    Payments: [{ PaymentID: "95f6a07c", Amount: 146.53 }],
+  } as XeroUnallocatedCredit;
+
+  it("normalises an allocation back to the invoice it was applied to", () => {
+    const out = normaliseUnallocatedCredit(allocated, "OVERPAYMENT", options);
+    expect(out.allocations).toEqual([
+      {
+        allocationId: "8977bb3f",
+        invoiceExternalId: "0bcec34b",
+        invoiceNumber: "402383299",
+        amount: { minor: 14653, currency: "GBP" },
+        allocatedAt: null,
+      },
+    ]);
+  });
+
+  it("records the payments that drew the credit down", () => {
+    // Non-empty means consumed. A bare RemainingCredit cannot answer this.
+    expect(
+      normaliseUnallocatedCredit(allocated, "OVERPAYMENT", options).drawnDownByPaymentIds,
+    ).toEqual(["95f6a07c"]);
+  });
+
+  it("reports an unconsumed credit as having neither", () => {
+    const out = normaliseUnallocatedCredit(LIVE_OVERPAYMENT, "OVERPAYMENT", options);
+    expect(out.allocations).toEqual([]);
+    expect(out.drawnDownByPaymentIds).toEqual([]);
+    expect(out.creditIsLive).toBe(true);
+  });
+
+  it("names the offending allocation when one fails to convert", () => {
+    const bad = {
+      ...LIVE_OVERPAYMENT,
+      Allocations: [{ AllocationID: "a", Amount: 1.005 }],
+    } as XeroUnallocatedCredit;
+    expect(() => normaliseUnallocatedCredit(bad, "OVERPAYMENT", options)).toThrow(
+      /Allocations\[0\]\.Amount/,
+    );
+  });
+
+  it("leaves allocations empty for payments and batches", () => {
+    expect(normalisePayment(LIVE_PAYMENT, options).allocations).toEqual([]);
+    expect(normaliseBatchPayment(LIVE_BATCH, options).drawnDownByPaymentIds).toEqual([]);
   });
 });

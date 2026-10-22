@@ -11,6 +11,7 @@ import { parseXeroDate } from "./dates";
 import type {
   PaymentSource,
   XeroAccount,
+  XeroAllocation,
   XeroBankTransaction,
   XeroBatchPayment,
   XeroCreditNote,
@@ -22,6 +23,7 @@ import type {
 import type {
   NormalisedBankTransaction,
   NormalisedCreditNote,
+  NormalisedCreditAllocation,
   NormalisedCreditNoteLine,
   NormalisedProviderPayment,
   NormalisedTracking,
@@ -194,6 +196,29 @@ export function normaliseBankTransactions(
 }
 
 /**
+ * Statuses on which a record's amounts are NOT real money.
+ *
+ * Xero returns cancelled records with their figures intact. Of 100 sampled DELETED payments,
+ * 100 carried a non-zero `Amount` — and page 1 of an unfiltered `/Payments` read is about a
+ * fifth DELETED. Nothing errors; the totals are simply wrong. Same family as the VOIDED
+ * credit-note and VOIDED overpayment traps.
+ */
+const CANCELLED_STATUSES: ReadonlySet<string> = new Set(["DELETED", "VOIDED"]);
+
+function toAllocations(
+  allocations: XeroAllocation[] | undefined,
+  currency: CurrencyCode,
+): NormalisedCreditAllocation[] {
+  return (allocations ?? []).map((allocation, index) => ({
+    allocationId: allocation.AllocationID ?? null,
+    invoiceExternalId: allocation.Invoice?.InvoiceID ?? null,
+    invoiceNumber: allocation.Invoice?.InvoiceNumber ?? null,
+    amount: toMoney(allocation.Amount, currency, `Allocations[${index}].Amount`),
+    allocatedAt: parseXeroDate(allocation.Date, undefined),
+  }));
+}
+
+/**
  * Direction for the payment family. Fatal on an unrecognised type, as everywhere else — a
  * guessed direction flips cash in the forecast.
  *
@@ -234,10 +259,36 @@ export function normalisePayment(
     paidAt: parseXeroDate(payment.Date, undefined),
     currency,
     amount: toMoney(payment.Amount, currency, "Amount"),
+    // BankAmount is what the statement will show; it diverges from Amount under a currency
+    // rate. Falls back to Amount rather than reporting zero when Xero omits it.
+    bankAmount: toMoney(payment.BankAmount ?? payment.Amount, currency, "BankAmount"),
+    amountIsLive: !CANCELLED_STATUSES.has(payment.Status ?? ""),
+    // A payment holds no unapplied credit; it IS the application.
+    creditIsLive: false,
+    allocations: [],
+    drawnDownByPaymentIds: [],
+    memberPaymentIds: [],
+    // A payment names its own batch -- the cheaper dedupe key against /BatchPayments.
+    batchExternalId: payment.BatchPaymentID ?? null,
+    statementLineExternalId: null,
     // Already applied to a document by definition.
     remainingCredit: money(0, currency),
     raw: payment,
   };
+}
+
+/**
+ * A batch's total, from TotalAmount with Amount as a fallback.
+ *
+ * Fatal when neither is present. That is the point: the previous code read only `Amount`,
+ * which live batches never send, and `toMoney(undefined)` quietly returned zero.
+ */
+function batchTotal(batch: XeroBatchPayment, currency: CurrencyCode): Money {
+  const total = batch.TotalAmount ?? batch.Amount;
+  if (total === undefined) {
+    throw new Error("batch payment has neither TotalAmount nor Amount");
+  }
+  return toMoney(total, currency, "TotalAmount");
 }
 
 export function normaliseBatchPayment(
@@ -267,7 +318,22 @@ export function normaliseBatchPayment(
     accountCode: batch.Account?.Code ?? null,
     paidAt: parseXeroDate(batch.Date, undefined),
     currency,
-    amount: toMoney(batch.Amount, currency, "Amount"),
+    // TotalAmount, NOT Amount. 5e35cd7 read `Amount` from documentation; live batches do not
+    // have it, and toMoney(undefined) returns zero rather than throwing — so all 1,421 of
+    // JENKI's batches would have normalised to £0.00 and summed to nothing, silently. Missing
+    // BOTH fields is now fatal for the record instead of quietly becoming zero.
+    amount: batchTotal(batch, currency),
+    bankAmount: batchTotal(batch, currency),
+    amountIsLive: !CANCELLED_STATUSES.has(batch.Status ?? ""),
+    creditIsLive: false,
+    allocations: [],
+    drawnDownByPaymentIds: [],
+    // The dedupe key against /Payments — batch members are also individual payment records.
+    memberPaymentIds: (batch.Payments ?? [])
+      .map((payment) => payment.PaymentID)
+      .filter((id): id is string => Boolean(id)),
+    batchExternalId: null, // it IS the batch
+    statementLineExternalId: batch.ReconciledStatementLineId ?? null,
     remainingCredit: money(0, currency),
     raw: batch,
   };
@@ -304,6 +370,18 @@ export function normaliseUnallocatedCredit(
     paidAt: parseXeroDate(credit.Date, undefined),
     currency,
     amount: toMoney(credit.Total, currency, "Total"),
+    bankAmount: toMoney(credit.Total, currency, "Total"),
+    amountIsLive: !CANCELLED_STATUSES.has(credit.Status ?? ""),
+    // The trap: 64 of 64 VOIDED overpayments keep a non-zero RemainingCredit, 0 of 36 PAID.
+    creditIsLive: LIVE_CREDIT_STATUSES.has(credit.Status ?? ""),
+    allocations: toAllocations(credit.Allocations, currency),
+    // Non-empty means a later payment has drawn this credit down.
+    drawnDownByPaymentIds: (credit.Payments ?? [])
+      .map((payment) => payment.PaymentID)
+      .filter((id): id is string => Boolean(id)),
+    memberPaymentIds: [],
+    batchExternalId: null,
+    statementLineExternalId: null,
     // The cash-relevant figure: money in the bank with nothing matched against it yet.
     remainingCredit: toMoney(credit.RemainingCredit, currency, "RemainingCredit"),
     raw: credit,

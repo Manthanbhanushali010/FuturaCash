@@ -494,7 +494,7 @@ async function fetchPaged<T>(
   key: string,
   parse: (body: unknown) => { success: true; items: T[] } | { success: false; detail: string },
   tenantId: string,
-  order: string,
+  query: { order: string; where?: string },
   options: FetchPagedOptions = {},
 ): Promise<PagedResult<T>> {
   const maxPages = options.maxPages ?? 10;
@@ -502,7 +502,9 @@ async function fetchPaged<T>(
   let truncated = false;
 
   for (let page = 1; page <= maxPages; page += 1) {
-    const body = await xeroGet(path, { tenantId, searchParams: { page: String(page), order } });
+    const searchParams: Record<string, string> = { page: String(page), order: query.order };
+    if (query.where) searchParams.where = query.where;
+    const body = await xeroGet(path, { tenantId, searchParams });
     const parsed = parse(body);
     if (!parsed.success) {
       throw new XeroApiError(200, path, `unexpected payload: ${parsed.detail}`);
@@ -515,9 +517,36 @@ async function fetchPaged<T>(
   return { items, truncated };
 }
 
+/**
+ * Status filter as a `where` clause.
+ *
+ * `Statuses=` is silently IGNORED across this API's endpoints — confirmed on /Payments
+ * (Statuses=DELETED returned a mix of AUTHORISED and DELETED) and on /CreditNotes. `where`
+ * is honoured everywhere it has been tested, including /BatchPayments, where `page` is not.
+ * An empty list is rejected rather than treated as a wildcard: no filter would quietly
+ * include cancelled records, which is the failure this exists to prevent.
+ */
+function statusWhere(statuses: readonly string[], path: string): string {
+  if (statuses.length === 0) {
+    throw new XeroApiError(0, path, "statuses must not be empty");
+  }
+  return statuses.map((status) => `Status=="${status}"`).join("||");
+}
+
+export interface FetchPaymentsOptions extends FetchPagedOptions {
+  /**
+   * Payment statuses to include. Defaults to AUTHORISED only.
+   *
+   * DELETED is excluded because Xero keeps the amounts on cancelled payments: 100 of 100
+   * sampled DELETED records carried a non-zero Amount, and about a fifth of an unfiltered
+   * read is DELETED. VOIDED does not occur on /Payments (0 records).
+   */
+  statuses?: readonly string[];
+}
+
 export async function fetchPayments(
   tenantId: string,
-  options: FetchPagedOptions = {},
+  options: FetchPaymentsOptions = {},
 ): Promise<PagedResult<XeroPayment>> {
   return fetchPaged<XeroPayment>(
     "/Payments",
@@ -529,28 +558,53 @@ export async function fetchPayments(
         : { success: false, detail: issues(p.error) };
     },
     tenantId,
-    "Date DESC",
+    { order: "Date DESC", where: statusWhere(options.statuses ?? ["AUTHORISED"], "/Payments") },
     options,
   );
 }
 
+export interface FetchBatchPaymentsOptions {
+  /** Batch statuses to include. Defaults to AUTHORISED; DELETED batches are 75 of 1,421. */
+  statuses?: readonly string[];
+}
+
+/**
+ * Batch payments — ONE unpaginated request, deliberately not via `fetchPaged`.
+ *
+ * Xero IGNORES `page` on this endpoint. `page=1` and `page=99` both return the complete set
+ * of 1,421 records. `fetchPaged` terminates only on a page shorter than 100, so it would
+ * have requested all ten pages, appended the same 1,421 records each time for **14,210
+ * duplicates**, and then reported `truncated: true` — which inverts the truth twice over:
+ * nothing was truncated, and everything was duplicated.
+ *
+ * `fetchPaged` is NOT generalised to cope with this. Every other endpoint here genuinely
+ * paginates, and loosening that loop's contract to accommodate one exception would put every
+ * other endpoint at risk of silently stopping early. The exception gets its own function.
+ *
+ * `truncated` is therefore always false, and that is a statement about Xero rather than a
+ * default: one call returns everything, so there is no bound to report.
+ *
+ * `where` IS honoured here even though `page` is not — verified, 1,346 AUTHORISED and 75
+ * DELETED of 1,421.
+ */
 export async function fetchBatchPayments(
   tenantId: string,
-  options: FetchPagedOptions = {},
+  options: FetchBatchPaymentsOptions = {},
 ): Promise<PagedResult<XeroBatchPayment>> {
-  return fetchPaged<XeroBatchPayment>(
-    "/BatchPayments",
-    "BatchPayments",
-    (body) => {
-      const p = BatchPaymentsResponse.safeParse(body);
-      return p.success
-        ? { success: true, items: p.data.BatchPayments }
-        : { success: false, detail: issues(p.error) };
-    },
+  const body = await xeroGet("/BatchPayments", {
     tenantId,
-    "Date DESC",
-    options,
-  );
+    // No `page`. Sending it would be harmless but misleading: it implies a bound that Xero
+    // does not apply, and the next reader would assume this loops.
+    searchParams: {
+      order: "Date DESC",
+      where: statusWhere(options.statuses ?? ["AUTHORISED"], "/BatchPayments"),
+    },
+  });
+  const parsed = BatchPaymentsResponse.safeParse(body);
+  if (!parsed.success) {
+    throw new XeroApiError(200, "/BatchPayments", `unexpected payload: ${issues(parsed.error)}`);
+  }
+  return { items: parsed.data.BatchPayments, truncated: false };
 }
 
 export async function fetchPrepayments(
@@ -567,7 +621,10 @@ export async function fetchPrepayments(
         : { success: false, detail: issues(p.error) };
     },
     tenantId,
-    "Date DESC",
+    // Deliberately UNFILTERED. VOIDED credits carry a phantom RemainingCredit, but the
+    // normaliser's `creditIsLive` handles that, and PAID records are needed for allocation
+    // history — filtering them out at the fetch would throw away how a credit was consumed.
+    { order: "Date DESC" },
     options,
   );
 }
@@ -586,7 +643,8 @@ export async function fetchOverpayments(
         : { success: false, detail: issues(p.error) };
     },
     tenantId,
-    "Date DESC",
+    // Unfiltered for the same reason as prepayments — see above.
+    { order: "Date DESC" },
     options,
   );
 }

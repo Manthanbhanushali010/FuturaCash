@@ -76,6 +76,17 @@ export interface NormalisedBankTransaction {
  * different sources of truth for overlapping money; reconciliation is the act of comparing
  * them, so collapsing any two would erase the distinction that work depends on.
  */
+/** One application of a prepayment or overpayment against an invoice. */
+export interface NormalisedCreditAllocation {
+  allocationId: string | null;
+  invoiceExternalId: string | null;
+  invoiceNumber: string | null;
+  /** The portion of the credit applied to that invoice, in integer minor units. */
+  amount: Money;
+  /** ISO 8601. */
+  allocatedAt: string | null;
+}
+
 export interface NormalisedProviderPayment {
   externalId: string;
   provider: ProviderName;
@@ -100,6 +111,70 @@ export interface NormalisedProviderPayment {
   currency: CurrencyCode;
   /** Integer minor units, unsigned. Direction carries the sign, as it does for invoices. */
   amount: Money;
+  /**
+   * What actually moved through the bank account, in integer minor units.
+   *
+   * Equals `amount` whenever `currencyRate` is 1, and differs when it is not: `amount` is in
+   * the document's currency, `bankAmount` in the bank account's. A cash position must use
+   * this, because it is the figure the statement will show. Falls back to `amount` when Xero
+   * omits it rather than reporting zero.
+   */
+  bankAmount: Money;
+  /**
+   * Whether `amount` represents money that actually moved.
+   *
+   * False for cancelled records, which Xero returns with their amounts intact: 100 of 100
+   * sampled DELETED payments carried a non-zero `Amount` (e.g. 250.00), and roughly a fifth
+   * of an unfiltered `/Payments` read is DELETED. Summing without this flag counts cancelled
+   * payments as real cash movement, and nothing errors.
+   */
+  amountIsLive: boolean;
+  /**
+   * Whether `remainingCredit` represents credit that is actually available.
+   *
+   * The same trap as `NormalisedCreditNote.creditIsLive`, and measured the same way: 64 of 64
+   * VOIDED overpayments keep a non-zero `RemainingCredit`, against 0 of 36 PAID. True only on
+   * statuses where unapplied credit is genuine.
+   */
+  creditIsLive: boolean;
+  /**
+   * How a prepayment or overpayment has been applied to invoices.
+   *
+   * Empty for Payments and BatchPayments. Together with `drawnDownByPaymentIds` this is what
+   * a bare `remainingCredit` cannot tell you: whether the credit was used, and against what.
+   */
+  allocations: NormalisedCreditAllocation[];
+  /**
+   * Payment ids that drew this credit down. Non-empty means the credit HAS been consumed.
+   *
+   * Xero sends these nested without a PaymentType or Invoice, so they are ids to join on,
+   * not payments in their own right.
+   */
+  drawnDownByPaymentIds: string[];
+  /**
+   * The individual payment ids a BATCH is composed of. Empty for every other source.
+   *
+   * This is the dedupe key for the project's largest double-counting risk. Batch members are
+   * ALSO individual `/Payments` records — 3 of 3 sampled members resolved from
+   * `GET /Payments/{id}`, and 61 of 100 records on page 120 of `/Payments` are batch members.
+   * Summing `/Payments` and `/BatchPayments` together counts that money twice, and the
+   * overlap is invisible on page 1 (2021 data, before JENKI used batches).
+   */
+  memberPaymentIds: string[];
+  /**
+   * The batch a PAYMENT belongs to, where Xero names one. Null for every other source.
+   *
+   * The counterpart to `memberPaymentIds`, and the cheaper of the two for deduping: a payment
+   * carrying this is a batch member, so `/Payments` can be filtered against `/BatchPayments`
+   * without first expanding every batch's membership. Xero sends a real GUID here, not the
+   * null GUID, so a value means a genuine batch.
+   */
+  batchExternalId: string | null;
+  /**
+   * The reconciled bank statement line, where Xero links one — batch payments only, on 1,307
+   * of JENKI's 1,421. The natural join for reconciliation against a real bank feed.
+   */
+  statementLineExternalId: string | null;
   /**
    * For prepayments and overpayments: the portion NOT yet applied to an invoice.
    *

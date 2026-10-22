@@ -223,10 +223,31 @@ export const XeroPayment = z
     Date: XeroDate.optional(),
     Reference: z.string().optional(),
     Amount: z.number().optional(),
+    /**
+     * What actually left or entered the bank account, which is NOT always `Amount`.
+     *
+     * 100% populated on JENKI's live payments. The two diverge whenever `CurrencyRate` is not
+     * 1: `Amount` is in the invoice's currency, `BankAmount` in the bank account's. A cash
+     * position has to use this one, because it is the figure the bank statement will show.
+     */
+    BankAmount: z.number().optional(),
     CurrencyRate: z.number().optional(),
     IsReconciled: z.boolean().optional(),
     Invoice: XeroInvoiceRef.optional(),
     Account: XeroAccountRef.optional(),
+    /**
+     * The batch this payment belongs to, where it belongs to one.
+     *
+     * This field was nearly removed on the strength of a bad measurement. A survey of
+     * `/Payments` page 1 found it on 0 of 100 records and concluded it did not exist — but
+     * page 1 is JENKI's OLDEST payments (2021), from before they used batch payments at all.
+     * Read newest-first, it is populated on 200 of 200, with real GUIDs rather than the null
+     * GUID, resolving to batches that exist. The same sampling trap produced the opposite
+     * wrong answer about the /Payments-to-/BatchPayments overlap.
+     *
+     * It matters because it is the cheaper half of the double-count defence: a payment can
+     * say which batch it belongs to, so the overlap can be deduped from either side.
+     */
     BatchPaymentID: z.string().optional(),
     UpdatedDateUTC: XeroDate.optional(),
   })
@@ -249,8 +270,20 @@ export const XeroBatchPayment = z
     Particulars: z.string().optional(),
     Narrative: z.string().optional(),
     Details: z.string().optional(),
+    /**
+     * The batch total. Named TotalAmount, NOT Amount.
+     *
+     * 5e35cd7 modelled `Amount` from documentation. Live records do not have it: every one of
+     * JENKI's 1,421 batches carries `TotalAmount` and no `Amount`. Because `toMoney(undefined)`
+     * returns zero rather than throwing, the effect was silent — all 1,421 batch payments
+     * would have normalised to £0.00 and summed to nothing.
+     */
+    TotalAmount: z.number().optional(),
+    /** Kept only as a fallback for an org that does send it; TotalAmount wins. */
     Amount: z.number().optional(),
     IsReconciled: z.boolean().optional(),
+    /** Links the batch to a reconciled bank statement line. Present on 1,307 of 1,421. */
+    ReconciledStatementLineId: z.string().optional(),
     Account: XeroAccountRef.optional(),
     Payments: z.array(XeroPayment).optional(),
     UpdatedDateUTC: XeroDate.optional(),
@@ -260,40 +293,6 @@ export type XeroBatchPayment = z.infer<typeof XeroBatchPayment>;
 
 export const BatchPaymentsResponse = z
   .object({ BatchPayments: z.array(XeroBatchPayment).default([]) })
-  .passthrough();
-
-/**
- * GET /Prepayments and GET /Overpayments — real cash in the bank not yet matched to an invoice.
- *
- * `RemainingCredit` is the field that matters for a cash position: the unallocated portion.
- * Same shape for both endpoints, so one schema serves each.
- */
-export const XeroUnallocatedCredit = z
-  .object({
-    PrepaymentID: z.string().optional(),
-    OverpaymentID: z.string().optional(),
-    Type: z.string().optional(),
-    Status: z.string().optional(),
-    Date: XeroDate.optional(),
-    Reference: z.string().optional(),
-    Contact: XeroContact.optional(),
-    CurrencyCode: z.string().optional(),
-    SubTotal: z.number().optional(),
-    TotalTax: z.number().optional(),
-    Total: z.number().optional(),
-    /** The portion not yet applied to an invoice — the cash-relevant number. */
-    RemainingCredit: z.number().optional(),
-    UpdatedDateUTC: XeroDate.optional(),
-  })
-  .passthrough();
-export type XeroUnallocatedCredit = z.infer<typeof XeroUnallocatedCredit>;
-
-export const PrepaymentsResponse = z
-  .object({ Prepayments: z.array(XeroUnallocatedCredit).default([]) })
-  .passthrough();
-
-export const OverpaymentsResponse = z
-  .object({ Overpayments: z.array(XeroUnallocatedCredit).default([]) })
   .passthrough();
 
 /**
@@ -344,6 +343,98 @@ export const XeroCreditNoteLineItem = z
   .passthrough();
 
 export type XeroCreditNoteLineItem = z.infer<typeof XeroCreditNoteLineItem>;
+
+/**
+ * How an overpayment or prepayment was applied to an invoice.
+ *
+ * Real shape from JENKI (2026-10-22): { AllocationID, Amount, Date, Invoice }. This is the
+ * join that answers "has this credit been used", which a bare RemainingCredit cannot.
+ */
+export const XeroAllocation = z
+  .object({
+    AllocationID: z.string().optional(),
+    Amount: z.number().optional(),
+    Date: XeroDate.optional(),
+    Invoice: XeroInvoiceRef.optional(),
+  })
+  .passthrough();
+
+export type XeroAllocation = z.infer<typeof XeroAllocation>;
+
+/**
+ * A payment as it appears NESTED inside an overpayment or prepayment.
+ *
+ * Deliberately thinner than `XeroPayment`: the nested form carries only PaymentID, Date,
+ * Amount, Reference and CurrencyRate — no PaymentType and no Invoice. Reusing XeroPayment
+ * here would imply fields Xero never sends in this position. The presence of entries is
+ * itself the signal: an overpayment with a non-empty Payments[] HAS been drawn down.
+ */
+export const XeroNestedPaymentRef = z
+  .object({
+    PaymentID: z.string().optional(),
+    Date: XeroDate.optional(),
+    Amount: z.number().optional(),
+    Reference: z.string().optional(),
+    CurrencyRate: z.number().optional(),
+  })
+  .passthrough();
+
+export type XeroNestedPaymentRef = z.infer<typeof XeroNestedPaymentRef>;
+
+/**
+ * GET /Prepayments and GET /Overpayments — real cash in the bank not yet matched to an invoice.
+ *
+ * `RemainingCredit` is the field that matters for a cash position: the unallocated portion.
+ * Same shape for both endpoints, so one schema serves each.
+ */
+export const XeroUnallocatedCredit = z
+  .object({
+    PrepaymentID: z.string().optional(),
+    OverpaymentID: z.string().optional(),
+    Type: z.string().optional(),
+    Status: z.string().optional(),
+    Date: XeroDate.optional(),
+    Reference: z.string().optional(),
+    Contact: XeroContact.optional(),
+    CurrencyCode: z.string().optional(),
+    SubTotal: z.number().optional(),
+    TotalTax: z.number().optional(),
+    Total: z.number().optional(),
+    /**
+     * The portion not yet applied to an invoice.
+     *
+     * Cash-relevant ONLY on some statuses. 64 of 64 VOIDED overpayments keep a non-zero
+     * value here, against 0 of 36 PAID — see `creditIsLive` on the normalised shape.
+     */
+    RemainingCredit: z.number().optional(),
+    LineAmountTypes: z.string().optional(),
+    /**
+     * Line items, identical in shape to a credit note's — verified field-for-field against
+     * JENKI's live overpayments, Tracking included. Stripped when the request omits `page`,
+     * exactly as on /CreditNotes.
+     */
+    LineItems: z.array(XeroCreditNoteLineItem).optional(),
+    /** How this credit has been applied to invoices. Absent in 5e35cd7. */
+    Allocations: z.array(XeroAllocation).optional(),
+    /**
+     * Later payments that drew this credit down. Absent in 5e35cd7, and it is the field that
+     * answers whether an overpayment has been consumed -- the lifecycle question a bare
+     * RemainingCredit cannot settle.
+     */
+    Payments: z.array(XeroNestedPaymentRef).optional(),
+    UpdatedDateUTC: XeroDate.optional(),
+  })
+  .passthrough();
+export type XeroUnallocatedCredit = z.infer<typeof XeroUnallocatedCredit>;
+
+export const PrepaymentsResponse = z
+  .object({ Prepayments: z.array(XeroUnallocatedCredit).default([]) })
+  .passthrough();
+
+export const OverpaymentsResponse = z
+  .object({ Overpayments: z.array(XeroUnallocatedCredit).default([]) })
+  .passthrough();
+
 
 /**
  * A credit note.

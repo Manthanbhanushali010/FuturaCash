@@ -4,7 +4,9 @@ import {
   clearChartOfAccountsCache,
   fetchBankTransactions,
   fetchChartOfAccounts,
+  fetchBatchPayments,
   fetchCreditNotes,
+  fetchPayments,
   fetchInvoices,
   getValidAccessToken,
 } from "./client";
@@ -754,5 +756,123 @@ describe("fetchCreditNotes", () => {
       Name: "Site",
       Option: "Selfridges",
     });
+  });
+});
+
+describe("fetchBatchPayments — the endpoint where Xero ignores `page`", () => {
+  /**
+   * Xero returns the COMPLETE set of batch payments on every request, whatever `page` says:
+   * page=1 and page=99 both gave all 1,421 of JENKI's records. The generic paged loop stops
+   * only on a page shorter than 100, so it would have asked ten times, appended the same set
+   * each time, and returned 14,210 records flagged `truncated: true`.
+   *
+   * The stub below reproduces exactly that behaviour: a full set, regardless of `page`.
+   */
+  function fullSetRegardlessOfPage(url: string) {
+    if (!url.includes("/BatchPayments")) return defaultHandler(url);
+    return {
+      body: {
+        BatchPayments: Array.from({ length: 150 }, (_, i) => ({
+          BatchPaymentID: `bp-${i}`,
+          Type: "PAYBATCH",
+          Status: "AUTHORISED",
+          TotalAmount: 10,
+        })),
+      },
+    };
+  }
+
+  it("makes exactly ONE request, not ten", async () => {
+    stubFetch(fullSetRegardlessOfPage);
+    await fetchBatchPayments(TENANT);
+    expect(calls.filter((c) => c.url.includes("/BatchPayments"))).toHaveLength(1);
+  });
+
+  it("returns 150 records, NOT 1,500 duplicates", async () => {
+    stubFetch(fullSetRegardlessOfPage);
+    const { items } = await fetchBatchPayments(TENANT);
+    expect(items).toHaveLength(150);
+    expect(new Set(items.map((b) => b.BatchPaymentID)).size).toBe(150);
+  });
+
+  it("reports truncated: false — nothing is bounded, one call returns everything", async () => {
+    stubFetch(fullSetRegardlessOfPage);
+    const { truncated } = await fetchBatchPayments(TENANT);
+    expect(truncated).toBe(false);
+  });
+
+  it("does not send `page`, which would imply a bound Xero does not apply", async () => {
+    stubFetch(fullSetRegardlessOfPage);
+    await fetchBatchPayments(TENANT);
+    const url = new URL(calls.find((c) => c.url.includes("/BatchPayments"))!.url);
+    expect(url.searchParams.get("page")).toBeNull();
+  });
+
+  it("still filters by status through `where`, which IS honoured here", async () => {
+    // Verified live: 1,346 AUTHORISED and 75 DELETED of 1,421. `where` works even though
+    // `page` does not, so the fix must not drop the filter along with the paging.
+    stubFetch(fullSetRegardlessOfPage);
+    await fetchBatchPayments(TENANT);
+    const url = new URL(calls.find((c) => c.url.includes("/BatchPayments"))!.url);
+    expect(url.searchParams.get("where")).toBe('Status=="AUTHORISED"');
+    expect(url.searchParams.get("Statuses")).toBeNull();
+  });
+
+  it("refuses an empty status list rather than reading cancelled batches", async () => {
+    stubFetch(fullSetRegardlessOfPage);
+    await expect(fetchBatchPayments(TENANT, { statuses: [] })).rejects.toThrow(
+      /statuses must not be empty/,
+    );
+  });
+});
+
+describe("fetchPayments — status filtering via `where`", () => {
+  function payments(url: string) {
+    if (!url.includes("/Payments")) return defaultHandler(url);
+    return {
+      body: {
+        Payments: [
+          { PaymentID: "p-1", PaymentType: "ACCRECPAYMENT", Status: "AUTHORISED", Amount: 1 },
+        ],
+      },
+    };
+  }
+
+  it("excludes DELETED by default, which keep a non-zero Amount", async () => {
+    // 100 of 100 sampled DELETED payments carried a real-looking amount.
+    stubFetch(payments);
+    await fetchPayments(TENANT);
+    const url = new URL(calls.find((c) => c.url.includes("/Payments"))!.url);
+    expect(url.searchParams.get("where")).toBe('Status=="AUTHORISED"');
+  });
+
+  it("never sends `Statuses`, which this API silently ignores", async () => {
+    stubFetch(payments);
+    await fetchPayments(TENANT, { statuses: ["AUTHORISED", "DELETED"] });
+    const url = new URL(calls.find((c) => c.url.includes("/Payments"))!.url);
+    expect(url.searchParams.get("Statuses")).toBeNull();
+    expect(url.searchParams.get("where")).toBe('Status=="AUTHORISED"||Status=="DELETED"');
+  });
+
+  it("refuses an empty status list", async () => {
+    stubFetch(payments);
+    await expect(fetchPayments(TENANT, { statuses: [] })).rejects.toThrow(
+      /statuses must not be empty/,
+    );
+  });
+
+  it("still paginates, because /Payments genuinely does", async () => {
+    // 24,520 live records, 100 per page. The BatchPayments exception must not leak here.
+    const full = {
+      Payments: Array.from({ length: 100 }, (_, i) => ({
+        PaymentID: `p-${i}`, PaymentType: "ACCRECPAYMENT", Status: "AUTHORISED", Amount: 1,
+      })),
+    };
+    stubFetch((url) => (url.includes("/Payments") ? { body: full } : defaultHandler(url)));
+    const { items, truncated } = await fetchPayments(TENANT, { maxPages: 3 });
+    const pages = calls.filter((c) => c.url.includes("/Payments"));
+    expect(pages.map((c) => new URL(c.url).searchParams.get("page"))).toEqual(["1", "2", "3"]);
+    expect(items).toHaveLength(300);
+    expect(truncated).toBe(true);
   });
 });

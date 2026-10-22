@@ -150,21 +150,50 @@ Record counts: **Payments 24,520 · BatchPayments 1,421 · Overpayments 534 · P
 
 ### The provisional layer in 5e35cd7 was documentation-based. What the live data corrects:
 
-- **BUG — `fetchBatchPayments` will return 10× duplicates.** Xero IGNORES `page` on
+- ~~**BUG — `fetchBatchPayments` will return 10× duplicates.**~~ **FIXED 2026-10-23.** One
+  unpaginated call, `truncated` always false, `where` filter retained (it IS honoured here
+  even though `page` is not — 1,346 AUTHORISED of 1,421). `fetchPaged` was deliberately NOT
+  generalised: every other endpoint genuinely paginates, and loosening that loop to
+  accommodate one exception would risk every other endpoint stopping early. Verified live:
+  **1,346 records, 1,346 distinct, 0 duplicates, truncated=false.** Original defect: Xero IGNORES `page` on
   `/BatchPayments`: `page=1` and `page=99` both return all 1,421 records. `fetchPaged` breaks
   only when a page comes back short of 100, so it will loop all 10 pages, accumulate
   **14,210 records (1,421 × 10)** and report `truncated: true`. Must special-case: one
   unpaginated call, no truncation flag. **Fix before anything consumes it.**
-- **`XeroPayment.BatchPaymentID` does not exist.** 0 of 100 live records carry it. The
-  payment→batch join is only available in the other direction, via `BatchPayments.Payments[]`.
-- **`XeroPayment` is missing `BankAmount`** (100% populated, and differs from `Amount` under
+- ~~**`XeroPayment.BatchPaymentID` does not exist.**~~ **THAT WAS WRONG — corrected 2026-10-23.**
+  It does exist and it works. The "0 of 100" measurement read `/Payments` page 1, which is
+  JENKI's OLDEST payments (2021), from before they used batch payments at all. Read
+  newest-first it is populated on **200 of 200**, with real GUIDs — not the null GUID —
+  resolving to batches that exist (`398a49ef` is the same batch whose members were separately
+  confirmed to resolve from `GET /Payments/{id}`).
+  **Page 1 of this API is the least representative sample available**, and the same trap
+  produced the opposite wrong answer about the /Payments↔/BatchPayments overlap. Any claim of
+  the form "field X is never populated" must be checked newest-first before it is believed.
+  Modelled as `batchExternalId`, and it is the cheaper half of the double-count defence: a
+  payment can name its batch, so the overlap dedupes from either side without expanding every
+  batch's membership.
+- ~~**`XeroPayment` is missing `BankAmount`**~~ **ADDED 2026-10-23** (live: 200/200 populated).
+  Originally: (100% populated, and differs from `Amount` under
   a currency rate — it is the amount that actually hit the bank). Also absent: `HasAccount`,
   `HasValidationErrors`.
-- **`XeroUnallocatedCredit` is missing the three fields that matter**: `LineItems` (100% on a
+- ~~**`XeroUnallocatedCredit` is missing the three fields that matter**~~ **ADDED 2026-10-23**
+  as `LineItems`, `Allocations[]` → `allocations`, `Payments[]` → `drawnDownByPaymentIds`.
+  Originally:: `LineItems` (100% on a
   paginated read), `Allocations[]` and `Payments[]`. Those are the join keys; without them an
   overpayment is an opaque total.
-- **No status filtering anywhere in the payment layer**, so stale rows are included — see
-  the traps below.
+- ~~**No status filtering anywhere in the payment layer.**~~ **FIXED 2026-10-23.** `/Payments`
+  and `/BatchPayments` now filter via `where` (default AUTHORISED), and an empty status list
+  is rejected rather than treated as a wildcard. `/Overpayments` and `/Prepayments` stay
+  deliberately UNFILTERED: `creditIsLive` handles the phantom credit, and PAID records carry
+  the allocation history that says how a credit was consumed.
+  Also found and fixed: **`XeroBatchPayment` modelled `Amount`, which live batches never
+  send** — they carry `TotalAmount`. Because `toMoney(undefined)` returns zero rather than
+  throwing, all 1,421 batches would have normalised to £0.00 and summed to nothing, silently.
+  Now prefers `TotalAmount`, keeps `Amount` as a fallback, and **throws when neither is
+  present** rather than becoming zero.
+  Added `amountIsLive` (false for DELETED/VOIDED, which keep their amounts) and `creditIsLive`
+  (true only on AUTHORISED/SUBMITTED), mirroring `NormalisedCreditNote`. Figures are kept
+  faithfully and the flags say whether to count them — zeroing would hide the discrepancy.
 - Confirmed correct: `PaymentID`, `PaymentType` (ACCRECPAYMENT/ACCPAYPAYMENT both live),
   `Status`, `Date`, `Reference`, `Amount`, `CurrencyRate`, `IsReconciled`, `Invoice`,
   `Account`, and `RemainingCredit` on the unallocated-credit shape. `.passthrough()` did its
