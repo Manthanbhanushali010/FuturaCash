@@ -3,6 +3,10 @@ node_modules/
 *.log
 dist/
 .DS_Store
+# Incremental typecheck cache. Was tracked, so it appeared in five consecutive commits as
+# meaningless churn and made "does this diff contain only what I described" harder to answer
+# than it should be.
+tsconfig.tsbuildinfo
 /prisma/migrations/dev.db
 __pycache__/
 .venv/
