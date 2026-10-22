@@ -28,6 +28,8 @@ import {
   type XeroPayment,
   type XeroUnallocatedCredit,
   type XeroOrganisation,
+  CreditNotesResponse,
+  XeroCreditNote,
 } from "./schemas";
 import {
   getXeroTokenStore,
@@ -610,4 +612,87 @@ function issues(error: z.ZodError): string {
 function truncate(text: string, max = 300): string {
   const collapsed = text.replace(/\s+/g, " ").trim();
   return collapsed.length > max ? `${collapsed.slice(0, max)}…` : collapsed;
+}
+
+export interface FetchCreditNotesResult {
+  creditNotes: XeroCreditNote[];
+  /** True when the page bound was reached with more still available. */
+  truncated: boolean;
+}
+
+export interface FetchCreditNotesOptions {
+  /**
+   * Xero credit note statuses to include. Defaults to those where unapplied credit is real.
+   *
+   * Excluding VOIDED and DELETED is not tidiness. Xero keeps `RemainingCredit` populated on
+   * cancelled credit notes: of JENKI's 600 surveyed, 317 carried a non-zero remaining credit
+   * and every one of those was VOIDED or DELETED. Reading them in would put cancelled
+   * paperwork into a figure labelled available credit.
+   */
+  statuses?: readonly string[];
+  /** Xero pages at 100. Bounded so one read cannot burn the daily call budget. */
+  maxPages?: number;
+}
+
+/**
+ * Credit notes, with line items and the tracking that makes site attribution possible.
+ *
+ * TWO THINGS HERE ARE NOT OPTIONAL, both established by surveying JENKI's live data on
+ * 2026-10-22 rather than from documentation.
+ *
+ * 1. `page` MUST be sent on every request. `GET /CreditNotes` without it returns all 1,578 of
+ *    JENKI's credit notes with `LineItems: []` — no error, no warning, just no line items.
+ *    With `page=1` the same records arrive with line items populated. Since `Tracking` lives
+ *    on the line item, an unpaginated read silently discards the Site and Revenue Centre
+ *    attribution that is the reason to read this endpoint at all. This is the same class of
+ *    defect as the `LineItems.Description` bug on bank transactions: a plausible request, a
+ *    complete-looking response, and missing data. The loop below starts at page 1 and always
+ *    sends the parameter; there is no code path that omits it.
+ *
+ * 2. Status selection goes through `where`, NOT `Statuses`. `Statuses=AUTHORISED` is silently
+ *    IGNORED on this endpoint — it returns the unfiltered first page, PAID and VOIDED
+ *    included. Copying `fetchInvoices`' use of `Statuses` here would have looked correct,
+ *    compiled, returned 200, and filtered nothing. `where=Status=="AUTHORISED"` returns 23
+ *    records, all AUTHORISED, which is the real outstanding set.
+ *
+ * Ordered by Date DESC rather than DueDate: `DueDate` is populated on only ~9% of JENKI's
+ * credit notes, so ordering by it would sort almost the entire set by a missing field.
+ */
+export async function fetchCreditNotes(
+  tenantId: string,
+  options: FetchCreditNotesOptions = {},
+): Promise<FetchCreditNotesResult> {
+  const statuses = options.statuses ?? ["AUTHORISED", "SUBMITTED"];
+  const maxPages = options.maxPages ?? 10;
+  const creditNotes: XeroCreditNote[] = [];
+  let truncated = false;
+
+  // Built as an OR over the requested statuses, which is what Xero's where syntax supports.
+  // An empty list would mean "no filter", which would silently include cancelled credit
+  // notes — so it is rejected rather than treated as a wildcard.
+  if (statuses.length === 0) {
+    throw new XeroApiError(0, "/CreditNotes", "statuses must not be empty");
+  }
+  const where = statuses.map((status) => `Status=="${status}"`).join("||");
+
+  for (let page = 1; page <= maxPages; page += 1) {
+    const body = await xeroGet("/CreditNotes", {
+      tenantId,
+      searchParams: {
+        // Always present. See note 1 above — omitting this strips every line item.
+        page: String(page),
+        where,
+        order: "Date DESC",
+      },
+    });
+    const parsed = CreditNotesResponse.safeParse(body);
+    if (!parsed.success) {
+      throw new XeroApiError(200, "/CreditNotes", `unexpected payload: ${issues(parsed.error)}`);
+    }
+    creditNotes.push(...parsed.data.CreditNotes);
+    if (parsed.data.CreditNotes.length < 100) break; // short page — the set is complete
+    if (page === maxPages) truncated = true;
+  }
+
+  return { creditNotes, truncated };
 }

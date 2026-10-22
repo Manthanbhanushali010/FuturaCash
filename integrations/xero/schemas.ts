@@ -295,3 +295,91 @@ export const PrepaymentsResponse = z
 export const OverpaymentsResponse = z
   .object({ Overpayments: z.array(XeroUnallocatedCredit).default([]) })
   .passthrough();
+
+/**
+ * A tracking entry on a credit note line item.
+ *
+ * Shape taken from JENKI's live data (surveyed 2026-10-22), not from documentation:
+ *
+ *   { "Name": "Site", "Option": "Selfridges",
+ *     "TrackingCategoryID": "762a4fd1-…", "Options": [] }
+ *
+ * Two things the real payload settles. There is NO `TrackingOptionID` — the option arrives
+ * only as its display string, so joining back to `/TrackingCategories` has to go through
+ * `Name`/`Option` text, and a renamed option breaks that join silently. And `Options` is
+ * always an empty array here: it belongs to the category resource, not to a line's tracking
+ * entry, so it must not be mistaken for the option that was actually applied.
+ */
+export const XeroTrackingEntry = z
+  .object({
+    Name: z.string().optional(),
+    Option: z.string().optional(),
+    TrackingCategoryID: z.string().optional(),
+  })
+  .passthrough();
+
+export type XeroTrackingEntry = z.infer<typeof XeroTrackingEntry>;
+
+/**
+ * A credit note line item.
+ *
+ * `Tracking` is the reason this endpoint is worth reading at all: 2,738 of JENKI's 3,017
+ * surveyed line items carry it (91%), across both "Site" and "Revenue Centre". It is also
+ * the field that vanishes if the request omits `page` — see `fetchCreditNotes`.
+ */
+export const XeroCreditNoteLineItem = z
+  .object({
+    Description: z.string().optional(),
+    Quantity: z.number().optional(),
+    UnitAmount: z.number().optional(),
+    LineAmount: z.number().optional(),
+    TaxAmount: z.number().optional(),
+    TaxType: z.string().optional(),
+    AccountCode: z.string().optional(),
+    AccountID: z.string().optional(),
+    LineItemID: z.string().optional(),
+    ItemCode: z.string().optional(),
+    Tracking: z.array(XeroTrackingEntry).optional(),
+  })
+  .passthrough();
+
+export type XeroCreditNoteLineItem = z.infer<typeof XeroCreditNoteLineItem>;
+
+/**
+ * A credit note.
+ *
+ * ACCRECCREDIT credits a customer, ACCPAYCREDIT is a supplier crediting us. `RemainingCredit`
+ * is the cash-relevant figure — but only on some statuses, which `normaliseCreditNote`
+ * records rather than assumes.
+ */
+export const XeroCreditNote = z
+  .object({
+    CreditNoteID: z.string(),
+    CreditNoteNumber: z.string().optional(),
+    Reference: z.string().optional(),
+    /** ACCRECCREDIT = credit to a customer. ACCPAYCREDIT = a supplier's credit to us. */
+    Type: z.string(),
+    Status: z.string(),
+    LineAmountTypes: z.string().optional(),
+    Contact: XeroContact.optional(),
+    Date: XeroDate.optional(),
+    DateString: z.string().optional(),
+    DueDate: XeroDate.optional(),
+    DueDateString: z.string().optional(),
+    FullyPaidOnDate: XeroDate.optional(),
+    CurrencyCode: z.string().optional(),
+    CurrencyRate: z.number().optional(),
+    SubTotal: z.number().optional(),
+    TotalTax: z.number().optional(),
+    Total: z.number().optional(),
+    RemainingCredit: z.number().optional(),
+    LineItems: z.array(XeroCreditNoteLineItem).optional(),
+    UpdatedDateUTC: XeroDate.optional(),
+  })
+  .passthrough();
+
+export type XeroCreditNote = z.infer<typeof XeroCreditNote>;
+
+export const CreditNotesResponse = z
+  .object({ CreditNotes: z.array(XeroCreditNote).default([]) })
+  .passthrough();

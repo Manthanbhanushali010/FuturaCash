@@ -109,3 +109,90 @@ export interface NormalisedProviderPayment {
   remainingCredit: Money;
   raw: unknown;
 }
+
+/** One tracking dimension applied to a credit note line, e.g. Site = "Selfridges". */
+export interface NormalisedTracking {
+  /** The tracking category's name, e.g. "Site" or "Revenue Centre". */
+  category: string;
+  /** The option applied, e.g. "Selfridges". Xero's display string — see below. */
+  option: string;
+  /**
+   * The CATEGORY's id. Xero does not send the option's id on a line's tracking entry, so
+   * there is no stable key for the option itself: a rename in Xero silently changes this
+   * value. Any grouping by site must treat the string as the identity and accept that.
+   *
+   * JENKI's real options also include several prefixed `DO NOT USE\old:`. They are kept
+   * verbatim here — deciding they are retired is a reading of one customer's naming
+   * convention, which belongs in a display or grouping layer, not in the normaliser.
+   */
+  categoryId: string | null;
+}
+
+/** A credit note line, carrying the tracking that makes site attribution possible. */
+export interface NormalisedCreditNoteLine {
+  lineId: string | null;
+  description: string | null;
+  /** May be fractional — a quantity is not money and is not converted to minor units. */
+  quantity: number | null;
+  accountCode: string | null;
+  /**
+   * Line total in integer minor units. `UnitAmount` is deliberately NOT carried: Xero allows
+   * four decimal places on a unit price, and `toMoney` forbids rounding, so converting it
+   * would manufacture normalisation failures for a figure nothing needs. It stays in `raw`.
+   */
+  lineAmount: Money;
+  taxAmount: Money;
+  tracking: NormalisedTracking[];
+}
+
+/**
+ * A credit note — money that reduces a commitment rather than settling it.
+ *
+ * `direction` follows the underlying ledger, exactly as `NormalisedCommitment` does:
+ * ACCRECCREDIT is INFLOW because it belongs to receivables, ACCPAYCREDIT is OUTFLOW because
+ * it belongs to payables. **A credit note REDUCES cash in that direction — it does not add
+ * to it.** Any consumer that sums these alongside invoices must subtract. Nothing consumes
+ * this type yet, which is why the warning is here rather than in a forecast.
+ */
+export interface NormalisedCreditNote {
+  externalId: string;
+  provider: ProviderName;
+  documentNumber: string | null;
+  reference: string | null;
+  direction: CommitmentDirection;
+  /** Xero's Type verbatim, e.g. "ACCPAYCREDIT", so an unusual variant stays diagnosable. */
+  providerType: string;
+  status: CommitmentStatus;
+  providerStatus: string;
+  counterpartyName: string | null;
+  counterpartyExternalId: string | null;
+  issuedAt: string | null; // ISO 8601
+  /** Populated on only ~9% of JENKI's credit notes, so useless for ordering or bucketing. */
+  dueAt: string | null; // ISO 8601
+  fullyPaidAt: string | null; // ISO 8601
+  total: Money;
+  /**
+   * Credit not yet applied to any invoice, as Xero reports it.
+   *
+   * Faithful to the payload, which means it is NOT automatically spendable — see
+   * `creditIsLive`. Stored verbatim rather than zeroed so the raw figure stays auditable.
+   */
+  remainingCredit: Money;
+  /**
+   * Whether `remainingCredit` represents real, available credit.
+   *
+   * This exists because of a trap in the live data (surveyed 2026-10-22). VOIDED and DELETED
+   * credit notes keep a non-zero `RemainingCredit` — JENKI has 317 such rows in 600, every
+   * one of them cancelled. Summing the field across all credit notes would have reported
+   * hundreds of pounds of credit that cannot be used, and nothing would have errored.
+   *
+   * True only for statuses where unapplied credit is genuine. All 23 of JENKI's AUTHORISED
+   * credit notes carry real remaining credit with no allocations against them.
+   */
+  creditIsLive: boolean;
+  currencyRate: number | null;
+  lines: NormalisedCreditNoteLine[];
+  /** Distinct tracking options across all lines, by category. Convenience, not new data. */
+  trackingByCategory: Record<string, string[]>;
+  raw: unknown;
+}

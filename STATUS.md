@@ -102,6 +102,18 @@ Finish the Xero data foundation (core cash-flow endpoints) before building the f
   shapes, so building them would be guessing from documentation, which is the exact position
   the payment layer is in. Authorised is not the same as buildable. Defer them until JENKI
   actually has rows, and check the count again before spending effort.
+- **Credit notes — fetch + schema + normalise BUILT 2026-10-22.** `fetchCreditNotes` paginates
+  from the first draft (never unpaginated), filters via `where` because `Statuses` is ignored
+  on this endpoint, orders `Date DESC`, and returns `{ creditNotes, truncated }`.
+  `normaliseCreditNote` produces `NormalisedCreditNote` with per-line `tracking` and a
+  `trackingByCategory` roll-up. 33 normaliser tests + 9 fetch-contract tests; all three hard
+  requirements are mutation-tested (drop `page` → 2 fail; swap `where` for `Statuses` → 3 fail;
+  treat every status as live credit → 4 fail). **Unwired from `readXeroSnapshot` and from any
+  display**, deliberately. `UnitAmount` is NOT normalised to Money — Xero allows 4dp on a unit
+  price and `toMoney` forbids rounding, so converting it would manufacture failures; it stays
+  in `raw`.
+  **`creditIsLive` is the field to understand before displaying anything**: `RemainingCredit`
+  is only real on AUTHORISED/SUBMITTED. See the trap below.
 - **`CreditNotes` strips `LineItems` unless you paginate** (verified 2026-10-22). `GET
   /CreditNotes` with no `page` returns all 1578 records with `LineItems: []`; `GET
   /CreditNotes?page=1` returns 100 records **with** line items populated. Same class of defect
@@ -112,6 +124,16 @@ Finish the Xero data foundation (core cash-flow endpoints) before building the f
   (direction matters, exactly as invoices), and `RemainingCredit > 0` on **26 of 100** — real
   unallocated cash, not a rounding curiosity. Assume the same no-page stripping applies to
   `Contacts` until proven otherwise.
+  **And the trap that matters most: `RemainingCredit` survives cancellation.** All 317 of the
+  600 surveyed rows with `RemainingCredit > 0` were VOIDED or DELETED; the only statuses where
+  it is real are AUTHORISED and SUBMITTED. JENKI has **23 AUTHORISED credit notes, all 23 with
+  genuine unapplied credit** and no allocations against them. Summing the field across all
+  credit notes would have reported hundreds of pounds of unusable credit, with nothing
+  erroring — a confidently wrong number. Hence `creditIsLive`.
+  Tracking is richly populated: **2,738 of 3,017 line items (91%)** carry it, across both
+  "Site" and "Revenue Centre", 1–2 entries per line. Real shape:
+  `{ Name, Option, TrackingCategoryID, Options: [] }` — there is **no `TrackingOptionID`**, so
+  the option exists only as a display string and a rename in Xero silently breaks any join.
 - Enhance bucket: Organisation (already built), Tax rates, Contacts
 - `CNY` is unsupported in `core/money.ts` — one JENKI transaction is excluded from totals and
   reported as a normalisation failure. `core/` is protected, so this needs a deliberate call.

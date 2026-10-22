@@ -4,6 +4,7 @@ import {
   clearChartOfAccountsCache,
   fetchBankTransactions,
   fetchChartOfAccounts,
+  fetchCreditNotes,
   fetchInvoices,
   getValidAccessToken,
 } from "./client";
@@ -165,11 +166,34 @@ function stubFetch(handler: (url: string) => { status?: number; body: unknown; h
   );
 }
 
+const CREDIT_NOTES_PAYLOAD = {
+  CreditNotes: [
+    {
+      CreditNoteID: "cn-1",
+      CreditNoteNumber: "GB6DV94ABEC",
+      Type: "ACCPAYCREDIT",
+      Status: "AUTHORISED",
+      CurrencyCode: "GBP",
+      Total: 22.1,
+      RemainingCredit: 22.1,
+      LineItems: [
+        {
+          Description: "Matcha tin 40g",
+          LineAmount: 22.1,
+          TaxAmount: 0,
+          Tracking: [{ Name: "Site", Option: "Selfridges", TrackingCategoryID: "tc-1" }],
+        },
+      ],
+    },
+  ],
+};
+
 function defaultHandler(url: string) {
   if (url.includes("/Organisation")) return { body: ORGANISATION_PAYLOAD };
   if (url.includes("/Accounts")) return { body: ACCOUNTS_PAYLOAD };
   if (url.includes("/Invoices")) return { body: INVOICES_PAYLOAD };
   if (url.includes("/BankTransactions")) return { body: BANK_TRANSACTIONS_PAYLOAD };
+  if (url.includes("/CreditNotes")) return { body: CREDIT_NOTES_PAYLOAD };
   if (url.includes("identity.xero.com/connect/token")) {
     return { body: { access_token: "access-rotated", refresh_token: "refresh-rotated", expires_in: 1800, token_type: "Bearer", scope: "x" } };
   }
@@ -626,5 +650,109 @@ describe("bank-transaction truncation is reported", () => {
     const url = new URL(calls.find((c) => c.url.includes("/BankTransactions"))!.url);
     expect([...url.searchParams.keys()].sort()).toEqual(["order", "page", "where"]);
     expect(url.searchParams.get("where")).not.toContain("Date");
+  });
+});
+
+describe("fetchCreditNotes", () => {
+  /**
+   * The pagination requirement is a correctness one, not a performance one.
+   *
+   * GET /CreditNotes without `page` returns every record with LineItems: [] -- surveyed on
+   * JENKI 2026-10-22: 1,578 records, not one line item, HTTP 200, no warning. Tracking lives
+   * on the line item, so an unpaginated read silently discards the Site attribution this
+   * endpoint exists to provide. These tests fail if anyone removes the parameter.
+   */
+  it("ALWAYS sends page -- omitting it silently strips every line item", async () => {
+    stubFetch(defaultHandler);
+    await fetchCreditNotes(TENANT);
+    const requests = calls.filter((c) => c.url.includes("/CreditNotes"));
+    expect(requests).not.toHaveLength(0);
+    for (const request of requests) {
+      expect(new URL(request.url).searchParams.get("page")).not.toBeNull();
+    }
+  });
+
+  it("sends page on every request when paging, starting at 1", async () => {
+    const full = {
+      CreditNotes: Array.from({ length: 100 }, (_, i) => ({
+        CreditNoteID: `cn-${i}`,
+        Type: "ACCPAYCREDIT",
+        Status: "AUTHORISED",
+        CurrencyCode: "GBP",
+        Total: 1,
+      })),
+    };
+    stubFetch((url) => (url.includes("/CreditNotes") ? { body: full } : defaultHandler(url)));
+
+    const { creditNotes, truncated } = await fetchCreditNotes(TENANT, { maxPages: 3 });
+    const pages = calls.filter((c) => c.url.includes("/CreditNotes"));
+    expect(pages.map((c) => new URL(c.url).searchParams.get("page"))).toEqual(["1", "2", "3"]);
+    expect(creditNotes).toHaveLength(300);
+    // A full page on the last iteration means Xero had more and we stopped asking.
+    expect(truncated).toBe(true);
+  });
+
+  it("reports truncated=false when a short page proves the set is complete", async () => {
+    stubFetch(defaultHandler);
+    const { truncated } = await fetchCreditNotes(TENANT);
+    expect(truncated).toBe(false);
+  });
+
+  /**
+   * Statuses= is SILENTLY IGNORED on /CreditNotes. Verified against JENKI 2026-10-22:
+   * Statuses=AUTHORISED returned the unfiltered first page, PAID and VOIDED included, while
+   * where=Status=="AUTHORISED" returned 23 records, all AUTHORISED. Copying fetchInvoices'
+   * use of Statuses here would compile, return 200, and filter nothing.
+   */
+  it("filters through `where`, not the silently-ignored `Statuses`", async () => {
+    stubFetch(defaultHandler);
+    await fetchCreditNotes(TENANT);
+    const url = new URL(calls.find((c) => c.url.includes("/CreditNotes"))!.url);
+    expect(url.searchParams.get("Statuses")).toBeNull();
+    expect(url.searchParams.get("where")).toBe('Status=="AUTHORISED"||Status=="SUBMITTED"');
+  });
+
+  it("excludes VOIDED and DELETED by default, which carry phantom remaining credit", async () => {
+    // 317 of JENKI's 600 surveyed credit notes had RemainingCredit > 0 and every one was
+    // cancelled. Reading them in would put voided paperwork into an available-credit figure.
+    stubFetch(defaultHandler);
+    await fetchCreditNotes(TENANT);
+    const where = new URL(calls.find((c) => c.url.includes("/CreditNotes"))!.url).searchParams.get(
+      "where",
+    )!;
+    expect(where).not.toContain("VOIDED");
+    expect(where).not.toContain("DELETED");
+  });
+
+  it("honours an explicit status list", async () => {
+    stubFetch(defaultHandler);
+    await fetchCreditNotes(TENANT, { statuses: ["PAID"] });
+    const url = new URL(calls.find((c) => c.url.includes("/CreditNotes"))!.url);
+    expect(url.searchParams.get("where")).toBe('Status=="PAID"');
+  });
+
+  it("refuses an empty status list rather than reading everything", async () => {
+    // An empty `where` means no filter, which would quietly include cancelled credit notes.
+    stubFetch(defaultHandler);
+    await expect(fetchCreditNotes(TENANT, { statuses: [] })).rejects.toThrow(
+      /statuses must not be empty/,
+    );
+  });
+
+  it("orders newest first, because DueDate is populated on only ~9% of records", async () => {
+    stubFetch(defaultHandler);
+    await fetchCreditNotes(TENANT);
+    const url = new URL(calls.find((c) => c.url.includes("/CreditNotes"))!.url);
+    expect(url.searchParams.get("order")).toBe("Date DESC");
+  });
+
+  it("returns a payload shaped like Xero's, with tracking intact on the line item", async () => {
+    stubFetch(defaultHandler);
+    const { creditNotes } = await fetchCreditNotes(TENANT);
+    expect(creditNotes).toHaveLength(1);
+    expect(creditNotes[0]!.LineItems![0]!.Tracking![0]).toMatchObject({
+      Name: "Site",
+      Option: "Selfridges",
+    });
   });
 });

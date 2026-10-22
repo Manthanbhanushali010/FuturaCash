@@ -13,11 +13,19 @@ import type {
   XeroAccount,
   XeroBankTransaction,
   XeroBatchPayment,
+  XeroCreditNote,
   XeroInvoice,
   XeroPayment,
+  XeroTrackingEntry,
   XeroUnallocatedCredit,
 } from "./schemas";
-import type { NormalisedBankTransaction, NormalisedProviderPayment } from "./types";
+import type {
+  NormalisedBankTransaction,
+  NormalisedCreditNote,
+  NormalisedCreditNoteLine,
+  NormalisedProviderPayment,
+  NormalisedTracking,
+} from "./types";
 
 /**
  * Xero → internal model. This file is the anti-corruption boundary (invariant #6): past it,
@@ -384,4 +392,112 @@ function collect<TRaw, TOut>(
     }
   }
   return result;
+}
+
+/**
+ * ACCRECCREDIT/ACCPAYCREDIT is the whole direction signal, so an unrecognised type is fatal
+ * for that record rather than defaulted — the same reasoning as `toDirection` for invoices.
+ *
+ * Note these are the credit note's OWN types, not an invoice's: Xero appends CREDIT, so a
+ * plain "ACCREC" arriving here means the payload is not what we think it is.
+ */
+function toCreditNoteDirection(type: string): CommitmentDirection {
+  switch (type) {
+    case "ACCRECCREDIT": // credit to a customer — belongs to receivables
+      return "INFLOW";
+    case "ACCPAYCREDIT": // a supplier's credit to us — belongs to payables
+      return "OUTFLOW";
+    default:
+      throw new Error(`Unrecognised Xero credit note type "${type}"`);
+  }
+}
+
+/**
+ * Statuses on which `RemainingCredit` is real money rather than a leftover field.
+ *
+ * VOIDED and DELETED credit notes keep their `RemainingCredit` in Xero's payload. In JENKI's
+ * live data every single row with a non-zero remaining credit outside this set was cancelled
+ * — 317 of 600 surveyed. Treating the field as cash without checking the status would have
+ * invented available credit out of voided paperwork.
+ */
+const LIVE_CREDIT_STATUSES: ReadonlySet<string> = new Set(["AUTHORISED", "SUBMITTED"]);
+
+function normaliseTracking(entries: XeroTrackingEntry[] | undefined): NormalisedTracking[] {
+  const tracking: NormalisedTracking[] = [];
+  for (const entry of entries ?? []) {
+    // A tracking entry with no category or no option carries no information. Skipped rather
+    // than thrown: one unlabelled line should not discard an otherwise valid credit note.
+    if (!entry.Name || !entry.Option) continue;
+    tracking.push({
+      category: entry.Name,
+      option: entry.Option,
+      categoryId: entry.TrackingCategoryID ?? null,
+    });
+  }
+  return tracking;
+}
+
+export interface NormaliseCreditNoteOptions {
+  /** Org base currency, used when a credit note omits CurrencyCode. */
+  fallbackCurrency: CurrencyCode;
+}
+
+export function normaliseCreditNote(
+  note: XeroCreditNote,
+  options: NormaliseCreditNoteOptions,
+): NormalisedCreditNote {
+  const currency = note.CurrencyCode ? parseCurrency(note.CurrencyCode) : options.fallbackCurrency;
+
+  const lines: NormalisedCreditNoteLine[] = (note.LineItems ?? []).map((line, index) => ({
+    lineId: line.LineItemID ?? null,
+    description: line.Description ?? null,
+    quantity: line.Quantity ?? null,
+    accountCode: line.AccountCode ?? null,
+    lineAmount: toMoney(line.LineAmount, currency, `LineItems[${index}].LineAmount`),
+    taxAmount: toMoney(line.TaxAmount, currency, `LineItems[${index}].TaxAmount`),
+    tracking: normaliseTracking(line.Tracking),
+  }));
+
+  const trackingByCategory: Record<string, string[]> = {};
+  for (const line of lines) {
+    for (const entry of line.tracking) {
+      const seen = trackingByCategory[entry.category] ?? [];
+      if (!seen.includes(entry.option)) seen.push(entry.option);
+      trackingByCategory[entry.category] = seen;
+    }
+  }
+
+  return {
+    externalId: note.CreditNoteID,
+    provider: "XERO",
+    documentNumber: note.CreditNoteNumber ?? null,
+    reference: note.Reference ?? null,
+    direction: toCreditNoteDirection(note.Type),
+    providerType: note.Type,
+    status: toStatus(note.Status),
+    providerStatus: note.Status,
+    counterpartyName: note.Contact?.Name ?? null,
+    counterpartyExternalId: note.Contact?.ContactID ?? null,
+    issuedAt: parseXeroDate(note.Date, note.DateString),
+    dueAt: parseXeroDate(note.DueDate, note.DueDateString),
+    fullyPaidAt: parseXeroDate(note.FullyPaidOnDate, undefined),
+    total: toMoney(note.Total, currency, "Total"),
+    remainingCredit: toMoney(note.RemainingCredit, currency, "RemainingCredit"),
+    creditIsLive: LIVE_CREDIT_STATUSES.has(note.Status),
+    currencyRate: note.CurrencyRate ?? null,
+    lines,
+    trackingByCategory,
+    raw: note,
+  };
+}
+
+export function normaliseCreditNotes(
+  notes: readonly XeroCreditNote[],
+  options: NormaliseCreditNoteOptions,
+): NormalisationResult<NormalisedCreditNote> {
+  return collect(
+    notes,
+    (note) => normaliseCreditNote(note, options),
+    (note) => note.CreditNoteID,
+  );
 }
