@@ -40,7 +40,12 @@ Finish the Xero data foundation (core cash-flow endpoints) before building the f
   `/Payments`, `/BatchPayments`, `/Prepayments`, `/Overpayments` — one scope, four endpoints.
   `accounting.journals.read` deliberately NOT added: the Advanced-tier gate means the scope
   would not unlock it, and asking for an unusable permission costs a re-consent for nothing.
-  **NEXT STEP IS LUKE RE-AUTHORISING.** No normaliser or display exists yet — re-consenting
+  **LUKE RE-AUTHORISED — CONFIRMED 2026-10-22.** Grant now holds nine scopes,
+  `accounting.payments.read` included, `missingScopes` is `[]`, and the `/xero` notice has
+  cleared. Note `connectedAt` is STILL 6 Sep: the store deliberately preserves the original
+  connection date across a re-consent, so **scope is the signal, not connectedAt**.
+  All four endpoints surveyed live — see "PAYMENT FAMILY SURVEY" below.
+  ~~NEXT STEP IS LUKE RE-AUTHORISING.~~ No normaliser or display exists yet — re-consenting
   does not make a Payments table appear. After he consents: survey the real payloads, then
   scope the build.
   ~~`/xero` does NOT prompt him.~~ **FIXED, AND VERIFIED LIVE 2026-10-22** (`ac66cc3`). The
@@ -139,6 +144,87 @@ Finish the Xero data foundation (core cash-flow endpoints) before building the f
   reported as a normalisation failure. `core/` is protected, so this needs a deliberate call.
 - The forecast engine itself — not started. Everything above is still data foundation.
 
+## PAYMENT FAMILY SURVEY — live, 2026-10-22 (read this before building the four)
+
+Record counts: **Payments 24,520 · BatchPayments 1,421 · Overpayments 534 · Prepayments 0.**
+
+### The provisional layer in 5e35cd7 was documentation-based. What the live data corrects:
+
+- **BUG — `fetchBatchPayments` will return 10× duplicates.** Xero IGNORES `page` on
+  `/BatchPayments`: `page=1` and `page=99` both return all 1,421 records. `fetchPaged` breaks
+  only when a page comes back short of 100, so it will loop all 10 pages, accumulate
+  **14,210 records (1,421 × 10)** and report `truncated: true`. Must special-case: one
+  unpaginated call, no truncation flag. **Fix before anything consumes it.**
+- **`XeroPayment.BatchPaymentID` does not exist.** 0 of 100 live records carry it. The
+  payment→batch join is only available in the other direction, via `BatchPayments.Payments[]`.
+- **`XeroPayment` is missing `BankAmount`** (100% populated, and differs from `Amount` under
+  a currency rate — it is the amount that actually hit the bank). Also absent: `HasAccount`,
+  `HasValidationErrors`.
+- **`XeroUnallocatedCredit` is missing the three fields that matter**: `LineItems` (100% on a
+  paginated read), `Allocations[]` and `Payments[]`. Those are the join keys; without them an
+  overpayment is an opaque total.
+- **No status filtering anywhere in the payment layer**, so stale rows are included — see
+  the traps below.
+- Confirmed correct: `PaymentID`, `PaymentType` (ACCRECPAYMENT/ACCPAYPAYMENT both live),
+  `Status`, `Date`, `Reference`, `Amount`, `CurrencyRate`, `IsReconciled`, `Invoice`,
+  `Account`, and `RemainingCredit` on the unallocated-credit shape. `.passthrough()` did its
+  job — every unmodelled field above survived in `raw`.
+
+### How the four join up
+
+- **`Payments.Invoice`** → `{ Type, InvoiceID, InvoiceNumber, … }`, populated on 100%. This is
+  a real join back to invoices. `Invoice.Type` spread ACCREC=35 / ACCPAY=65 on page 1.
+- **`Payments.Account`** → `{ AccountID, Code, CurrencyCode }`, joins to the chart of accounts.
+- **No credit-note reference**: 0 of 100 payments carried a `CreditNote` ref.
+- **`BatchPayments.Payments[]`** → `{ Invoice, PaymentID, Amount, BankAmount }`, 9,081 members
+  across 1,421 batches. Carries `PaymentID`, so members are resolvable individually.
+- **`Overpayments.Allocations[]`** → `{ AllocationID, Amount, Date, Invoice }` — how an
+  overpayment is applied to an invoice. **`Overpayments.Payments[]`** → `{ PaymentID, … }`, so
+  **yes, an overpayment IS later consumed by a Payment**, the same lifecycle as CreditNotes.
+
+### DOUBLE-COUNTING RISKS — all three are real
+
+1. **`/Payments` and `/BatchPayments` OVERLAP.** Sampled a recent PAYBATCH and resolved its
+   members individually: **3 of 3 returned HTTP 200 from `GET /Payments/{id}`**. Measured on
+   page 120 of `/Payments`, **61 of 100 records are batch members**. Summing both endpoints
+   double-counts. Beware the sampling trap: page 1 shows **0 of 100** overlap, because page 1
+   is 2021 and JENKI adopted batch payments later — an overlap check on page 1 alone concludes
+   "disjoint" and is wrong.
+2. **Our existing bank read ALREADY contains overpayments.** Replaying the shipped query
+   (`where Status=="AUTHORISED"`, `order Date DESC`, 10 pages) returns **17 SPEND-OVERPAYMENT
+   rows, every one carrying an `OverpaymentID`**. Adding `/Overpayments` on top double-counts
+   those. Bank transactions carry `OverpaymentID`/`PrepaymentID` as links, and their
+   `BankTransactionID` is a DIFFERENT id from the `OverpaymentID` — so dedupe on the link
+   field, never on the primary key.
+3. **61% of the live bank window is internal transfers.** Same query: 307 RECEIVE-TRANSFER +
+   306 SPEND-TRANSFER out of 1,000 rows. A transfer between JENKI's own accounts appears
+   twice, once each way, so any consolidated total that sums bank rows naively is inflated by
+   roughly double the transfer volume.
+   **This answers the `/BankTransfers` open question: yes, money moves between JENKI's own
+   accounts, constantly.**
+   **Not currently a wrong number** — nothing sums bank transactions today (`page.tsx` only
+   counts and lists them; `outstandingByDirection` runs on invoices only). It is a latent
+   forecast-engine risk, and the reason to settle it before the engine exists.
+
+### Traps, same family as the CreditNotes ones
+
+- **DELETED payments keep their amount.** `where Status=="DELETED"` returns 100 records and
+  **100 of 100 have a non-zero `Amount`** (e.g. 250, BankAmount 250). Page 1 of `/Payments` is
+  AUTHORISED=79 / DELETED=21, so roughly a fifth of an unfiltered read is cancelled payments
+  carrying real-looking money.
+- **VOIDED overpayments keep their remaining credit** — `RemainingCredit > 0` on **64 of 64
+  VOIDED**, and **0 of 36 PAID**. Identical to the CreditNotes trap, so the `creditIsLive`
+  treatment applies here unchanged.
+- **`Statuses=` is silently ignored on `/Payments`** (`Statuses=DELETED` returned a mix of
+  AUTHORISED and DELETED). `where=Status=="…"` works. Third endpoint family in a row where
+  this is true — treat `Statuses` as unsupported unless proven otherwise on that endpoint.
+- **`/Overpayments` strips `LineItems` without `page`** — the CreditNotes defect again.
+  `fetchPaged` already sends `page`, so the existing layer avoids this one by luck.
+- **`/Payments` with no `page` returns all 24,520 records in one response.** No cap. Easy to
+  do by accident and expensive.
+- **`/Prepayments` is genuinely empty for JENKI** — 0 records, and 0 bank transactions of type
+  SPEND-PREPAYMENT or RECEIVE-PREPAYMENT. Unsurveyable, and nothing is lost by deferring it.
+
 ## Known gate (confirmed Oct 2026 — don't re-litigate)
 
 Xero's `/Journals` endpoint now requires the Advanced pricing tier (~$1,445 AUD/month) plus a
@@ -176,9 +262,10 @@ a cost/approval reason neither of us knew until this was checked.
 - Xero Bank Feeds API beta (via Luke's "remitclear" contact) — a channel for *posting*
   statement data into Xero, not pulling richer data out. Only relevant after a real bank-data
   source is chosen — not an alternative to choosing one.
-- Does money move between JENKI's own bank accounts? If so `/BankTransfers` matters — with six
-  locations, ignoring it could make individual account balances wrong even when the consolidated
-  position is right. Ask Luke rather than assuming.
+- ~~Does money move between JENKI's own bank accounts?~~ **ANSWERED 2026-10-22 — YES,
+  constantly.** 613 of the 1,000 rows in the live bank window are transfers (307
+  RECEIVE-TRANSFER, 306 SPEND-TRANSFER). No need to ask Luke. `/BankTransfers` is therefore
+  real, and the double-counting consequence is recorded in the payment-family survey above.
 - **Does JENKI deal in foreign currency routinely, or was the CNY transaction a one-off?**
   **Strong new evidence 2026-10-22: routinely.** Six of JENKI's eight purchase orders are
   **USD**, not GBP, at a stored `CurrencyRate` (e.g. 1.35916) — so foreign currency is a
