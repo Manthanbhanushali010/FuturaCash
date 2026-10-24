@@ -278,14 +278,59 @@ Movement: **IN 3,501,847.09 GBP / OUT 4,205,165.20 GBP + 253.27 USD**. Committed
 invoices, deliberately NOT in movement): IN 71,707.30 GBP / OUT 298,935.09 GBP + 4,171.50 USD.
 Available credit (`creditIsLive` only): **1,170.79 GBP**. `tiesOut: true`, 0 discrepancies.
 
-**THE NUMBER THAT IS NOT YET USABLE: net movement.** Three design facts make it so, and all
-three are reported rather than hidden:
-1. **The sources cover different periods.** BatchPayments (1,346) and Overpayments (534) are
-   COMPLETE. Payments is the most recent **1,000 of 24,520**, and BankTransactions the most
-   recent 1,000. So the batch total spans years of history while the payment total spans
-   months. Adding them gives a figure with no coherent period. `reconcile` now takes the
-   `truncated` sources and warns per source. **Date-bounded reads across all five with one
-   shared window are the fix, and the next real build.**
+**NET MOVEMENT IS NOW A REAL FIGURE — shared 30-day window, 2026-10-24.**
+`RECONCILIATION_WINDOW_DAYS = 30`, `recentWindow()` in `client.ts`, applied to Payments,
+BankTransactions, BatchPayments and Overpayments. **All four complete — `truncated: false`
+on every one, every oldest record exactly on the window boundary, 0 discrepancies, 0
+warnings.**
+
+Window 2026-09-24 → 2026-10-24:
+
+| Counted | Records | Amount |
+|---|---|---|
+| BANK_TRANSACTION | 146 | 1,125,779.42 GBP · 115.39 USD |
+| PAYMENT | 423 | 751,410.01 GBP |
+| BATCH_PAYMENT | 26 | 661,964.41 GBP |
+| OVERPAYMENT | 13 | 930.79 GBP |
+
+| Excluded | Records | Amount |
+|---|---|---|
+| BANK · INTERNAL_TRANSFER | 394 | 1,178,342.58 GBP |
+| PAYMENT · BATCH_MEMBER | 619 | 661,964.41 GBP |
+| BANK · OVERPAYMENT_ALREADY_IN_BANK | 13 | 930.79 GBP |
+
+**NET MOVEMENT: IN 1,335,588.62 GBP / OUT 1,204,496.01 GBP → +131,092.61 GBP** (and −115.39
+USD). Committed, unwindowed: IN 71,707.30 / OUT 298,935.09 GBP + 4,171.50 USD. Available
+credit 930.79 GBP.
+
+**THE DEDUPE IS SELF-VERIFYING AT THIS WINDOW, and that is the strongest evidence yet.** Two
+pairs came out identical to the penny, which no amount of code review could establish:
+- BATCH_PAYMENT counted **661,964.41** = PAYMENT·BATCH_MEMBER excluded **661,964.41**. The 619
+  excluded member payments sum to exactly the 26 batch totals, so every batch's membership is
+  fully present in the payments read and nothing is double-counted or lost.
+- OVERPAYMENT counted **930.79** = BANK·OVERPAYMENT_ALREADY_IN_BANK excluded **930.79**, 13
+  records each way.
+
+**WHY 30 AND NOT 90.** Measured: **32.6 payments/day, 19.1 bank rows/day**. At 100 per page
+that is ~10 and ~6 pages for 30 days. 90 days needs ~30 and ~18 — tried first, and at
+`maxPages: 20` both truncated, so payments reached back only to 21 August while batch payments
+and overpayments covered the full window. **The date bound was honoured and the PAGE bound
+still bit inside it**, reproducing the original defect one level down: a window only partly
+read is a period figure that is quietly wrong. And ~48 calls for two sources breaches Xero's
+60/minute budget once the other reads are added — the first 90-day attempt died on a live 429.
+To go wider, chunk the window into sub-windows that each complete, or move the read off the
+request path. Raising `maxPages` alone does not fix it.
+
+**Date bounds verified PER ENDPOINT, not assumed** (`Statuses=` has been silently ignored on
+three endpoints in a row). `where=Date>=DateTime(y,m,d)` is honoured on /Payments,
+/BankTransactions, /BatchPayments and /Overpayments — and on /BatchPayments it works even
+though `page` is ignored there. An exclusive upper bound `Date<DateTime(...)` works too.
+**Multi-status filters are now PARENTHESISED**: `&&` binds tighter than `||`, so
+`A||B&&Date>=X` parses as `A || (B && Date>=X)` and would return status-A records from outside
+the window while appearing to respect it. Mutation-tested, along with UTC date parts (local
+getters shift the boundary a day under BST) and the window reaching every source.
+
+Still reported rather than hidden:
 2. Invoices are reported separately and never added to movement. An invoice is an obligation,
    a payment is its settlement; summing both counts the same money twice.
 3. Transfers are excluded, not netted — 629 rows, 2.24M GBP, visible as its own line.

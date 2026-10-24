@@ -1,11 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  RECONCILIATION_WINDOW_DAYS,
   XeroRateLimitError,
+  recentWindow,
   clearChartOfAccountsCache,
   fetchBankTransactions,
   fetchChartOfAccounts,
   fetchBatchPayments,
   fetchCreditNotes,
+  fetchOverpayments,
   fetchPayments,
   fetchInvoices,
   getValidAccessToken,
@@ -851,7 +854,10 @@ describe("fetchPayments — status filtering via `where`", () => {
     await fetchPayments(TENANT, { statuses: ["AUTHORISED", "DELETED"] });
     const url = new URL(calls.find((c) => c.url.includes("/Payments"))!.url);
     expect(url.searchParams.get("Statuses")).toBeNull();
-    expect(url.searchParams.get("where")).toBe('Status=="AUTHORISED"||Status=="DELETED"');
+    // PARENTHESISED. A date bound is appended with `&&`, and `&&` binds tighter than `||`, so
+    // the bare form would parse as `A || (B && Date>=X)` and let status-A records in from
+    // outside the window — while still looking correct, because most rows would fall inside.
+    expect(url.searchParams.get("where")).toBe('(Status=="AUTHORISED"||Status=="DELETED")');
   });
 
   it("refuses an empty status list", async () => {
@@ -874,5 +880,149 @@ describe("fetchPayments — status filtering via `where`", () => {
     expect(pages.map((c) => new URL(c.url).searchParams.get("page"))).toEqual(["1", "2", "3"]);
     expect(items).toHaveLength(300);
     expect(truncated).toBe(true);
+  });
+});
+
+describe("the shared reporting window", () => {
+  /**
+   * Verified live on 2026-10-24, per endpoint rather than once: a `Date>=DateTime(y,m,d)`
+   * predicate is honoured on /Payments, /BankTransactions, /BatchPayments and /Overpayments,
+   * and on /BatchPayments it works even though `page` is ignored there. Checking each
+   * separately was not pedantry — `Statuses=` has been silently ignored on three endpoints in
+   * a row, so one endpoint's behaviour predicts nothing about the next.
+   */
+  const SINCE = new Date(Date.UTC(2026, 6, 26)); // 26 July 2026
+  const UNTIL = new Date(Date.UTC(2026, 9, 24)); // 24 October 2026
+
+  function all(url: string) {
+    if (url.includes("/Payments")) return { body: { Payments: [] } };
+    if (url.includes("/BatchPayments")) return { body: { BatchPayments: [] } };
+    if (url.includes("/Overpayments")) return { body: { Overpayments: [] } };
+    if (url.includes("/BankTransactions")) return { body: { BankTransactions: [] } };
+    return defaultHandler(url);
+  }
+  const whereOf = (fragment: string) =>
+    new URL(calls.find((c) => c.url.includes(fragment))!.url).searchParams.get("where")!;
+
+  it("sends the same date predicate to every source", async () => {
+    stubFetch(all);
+    await fetchPayments(TENANT, { window: { since: SINCE } });
+    await fetchBankTransactions(TENANT, { window: { since: SINCE } });
+    await fetchBatchPayments(TENANT, { window: { since: SINCE } });
+    await fetchOverpayments(TENANT, { window: { since: SINCE } });
+
+    for (const path of ["/Payments", "/BankTransactions", "/BatchPayments", "/Overpayments"]) {
+      expect(whereOf(path)).toContain("Date>=DateTime(2026,7,26)");
+    }
+  });
+
+  it("formats the boundary from UTC parts, not local ones", async () => {
+    // Chosen so the two disagree ON THIS MACHINE. 23:30Z on 25 July is 00:30 on the 26th in
+    // London under BST, so UTC parts give the 25th and local parts the 26th. A midnight-UTC
+    // instant would pass either way here and prove nothing.
+    stubFetch(all);
+    await fetchPayments(TENANT, { window: { since: new Date("2026-07-25T23:30:00Z") } });
+    expect(whereOf("/Payments")).toContain("Date>=DateTime(2026,7,25)");
+  });
+
+  it("adds an exclusive upper bound when one is given", async () => {
+    stubFetch(all);
+    await fetchPayments(TENANT, { window: { since: SINCE, until: UNTIL } });
+    expect(whereOf("/Payments")).toContain("Date<DateTime(2026,10,24)");
+  });
+
+  it("keeps the status filter alongside the window", async () => {
+    stubFetch(all);
+    await fetchPayments(TENANT, { window: { since: SINCE } });
+    expect(whereOf("/Payments")).toBe('Status=="AUTHORISED"&&Date>=DateTime(2026,7,26)');
+  });
+
+  it("parenthesises a multi-status filter so && cannot capture one branch", async () => {
+    // Without the parentheses this reads as `A || (B && Date>=X)`: status-A records would
+    // return from outside the window, and the window would appear to have been respected.
+    stubFetch(all);
+    await fetchPayments(TENANT, {
+      statuses: ["AUTHORISED", "DELETED"],
+      window: { since: SINCE },
+    });
+    expect(whereOf("/Payments")).toBe(
+      '(Status=="AUTHORISED"||Status=="DELETED")&&Date>=DateTime(2026,7,26)',
+    );
+  });
+
+  it("windows overpayments WITHOUT imposing a status filter", async () => {
+    // Status and date are separate axes here: VOIDED credit is handled by creditIsLive, and
+    // PAID records carry the allocation history that says how a credit was consumed.
+    stubFetch(all);
+    await fetchOverpayments(TENANT, { window: { since: SINCE } });
+    const where = whereOf("/Overpayments");
+    expect(where).toBe("Date>=DateTime(2026,7,26)");
+    expect(where).not.toContain("Status");
+  });
+
+  it("sends no where at all for overpayments when no window is given", async () => {
+    stubFetch(all);
+    await fetchOverpayments(TENANT);
+    const url = new URL(calls.find((c) => c.url.includes("/Overpayments"))!.url);
+    expect(url.searchParams.get("where")).toBeNull();
+  });
+
+  it("leaves every request unwindowed when no window is given", async () => {
+    stubFetch(all);
+    await fetchPayments(TENANT);
+    await fetchBankTransactions(TENANT);
+    await fetchBatchPayments(TENANT);
+    for (const path of ["/Payments", "/BankTransactions", "/BatchPayments"]) {
+      expect(whereOf(path)).not.toContain("Date");
+    }
+  });
+
+  it("still sends `page` on the endpoints that paginate, and not on batches", async () => {
+    stubFetch(all);
+    await fetchPayments(TENANT, { window: { since: SINCE } });
+    await fetchBatchPayments(TENANT, { window: { since: SINCE } });
+    const pay = new URL(calls.find((c) => c.url.includes("/Payments"))!.url);
+    const batch = new URL(calls.find((c) => c.url.includes("/BatchPayments"))!.url);
+    expect(pay.searchParams.get("page")).toBe("1");
+    expect(batch.searchParams.get("page")).toBeNull();
+  });
+});
+
+describe("recentWindow", () => {
+  it("defaults to the measured 30 days", () => {
+    const now = new Date("2026-10-24T12:00:00Z");
+    expect(recentWindow(undefined, now).since.toISOString()).toBe("2026-09-24T12:00:00.000Z");
+    expect(RECONCILIATION_WINDOW_DAYS).toBe(30);
+  });
+
+  it("leaves the upper bound open, meaning up to the latest record", () => {
+    expect(recentWindow(30, new Date("2026-10-24T12:00:00Z")).until).toBeUndefined();
+  });
+
+  it("takes an explicit span, for a narrower read", () => {
+    const now = new Date("2026-10-24T12:00:00Z");
+    expect(recentWindow(7, now).since.toISOString()).toBe("2026-10-17T12:00:00.000Z");
+  });
+
+  it("drives the same window into every source", async () => {
+    // The point of the helper: one call site, so two sources cannot drift apart.
+    const window = recentWindow(30, new Date("2026-10-24T12:00:00Z"));
+    stubFetch((url) => {
+      if (url.includes("/Payments")) return { body: { Payments: [] } };
+      if (url.includes("/BatchPayments")) return { body: { BatchPayments: [] } };
+      if (url.includes("/Overpayments")) return { body: { Overpayments: [] } };
+      if (url.includes("/BankTransactions")) return { body: { BankTransactions: [] } };
+      return defaultHandler(url);
+    });
+    await fetchPayments(TENANT, { window });
+    await fetchBankTransactions(TENANT, { window });
+    await fetchBatchPayments(TENANT, { window });
+    await fetchOverpayments(TENANT, { window });
+    const wheres = calls
+      .filter((c) => !c.url.includes("identity.xero.com") && !c.url.includes("/connections"))
+      .map((c) => new URL(c.url).searchParams.get("where") ?? "");
+    const dated = wheres.filter((w) => w.includes("Date>="));
+    expect(dated).toHaveLength(4);
+    expect(new Set(dated.map((w) => /Date>=DateTime\([^)]*\)/.exec(w)![0])).size).toBe(1);
   });
 });

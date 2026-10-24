@@ -60,3 +60,16 @@ export function parseXeroDate(
 export function toCalendarDay(isoString: string): string {
   return isoString.slice(0, 10);
 }
+
+/**
+ * A date as Xero's `where` clause wants it: `DateTime(2026,7,26)`.
+ *
+ * UTC components deliberately. Using the local getters would shift the boundary by a day for
+ * anyone west of UTC, which on a 90-day window is a silent off-by-one at both ends — the kind
+ * of error that makes two reads of "the same" window disagree by a day's trading.
+ *
+ * No leading zeros: `DateTime(2026,7,26)` is what Xero accepts, verified live 2026-10-24.
+ */
+export function toXeroDateTime(value: Date): string {
+  return `DateTime(${value.getUTCFullYear()},${value.getUTCMonth() + 1},${value.getUTCDate()})`;
+}

@@ -31,6 +31,7 @@ import {
   CreditNotesResponse,
   XeroCreditNote,
 } from "./schemas";
+import { toXeroDateTime } from "./dates";
 import {
   getXeroTokenStore,
   type XeroTenantConnection,
@@ -424,6 +425,15 @@ export interface FetchBankTransactionsOptions {
   statuses?: readonly string[];
   /** Xero pages at 100. Bounded so one page load cannot burn the daily call budget. */
   maxPages?: number;
+  /**
+   * Restrict to a shared reporting window.
+   *
+   * This is the real answer to the truncation this endpoint has always had. A page bound makes
+   * the visible span an artefact of row volume — 1,000 rows is about 71 days today and fewer
+   * as JENKI gets busier — whereas a date bound makes it a decision. Verified live: the same
+   * query with a 90-day bound returns rows starting exactly at the boundary, none older.
+   */
+  window?: DateWindow;
 }
 
 /**
@@ -444,7 +454,10 @@ export async function fetchBankTransactions(
   const maxPages = options.maxPages ?? 10;
   const transactions: XeroBankTransaction[] = [];
   let truncated = false;
-  const where = statuses.map((status) => `Status=="${status}"`).join(" OR ");
+  const where = andWhere(
+    statusWhere(statuses, "/BankTransactions"),
+    ...windowClauses(options.window),
+  );
 
   for (let page = 1; page <= maxPages; page += 1) {
     const body = await xeroGet("/BankTransactions", {
@@ -530,10 +543,82 @@ function statusWhere(statuses: readonly string[], path: string): string {
   if (statuses.length === 0) {
     throw new XeroApiError(0, path, "statuses must not be empty");
   }
-  return statuses.map((status) => `Status=="${status}"`).join("||");
+  const clause = statuses.map((status) => `Status=="${status}"`).join("||");
+  // PARENTHESISED when there is more than one status, because a date bound is appended with
+  // `&&` and `&&` binds tighter than `||`. Unparenthesised, `A||B&&Date>=X` parses as
+  // `A || (B && Date>=X)` — so records with status A would come back from OUTSIDE the window,
+  // and the window would look like it was respected because most rows did fall inside it.
+  return statuses.length > 1 ? `(${clause})` : clause;
+}
+
+/**
+ * A shared reporting window.
+ *
+ * Shared is the whole point: reconciling a complete source against a bounded one produces a
+ * figure with no coherent period, which is exactly what made the first net-movement total
+ * unusable. Every source in a reconciliation must be asked for the same days.
+ */
+export interface DateWindow {
+  /** Inclusive lower bound on the record's own transaction date. */
+  since: Date;
+  /** Exclusive upper bound. Omitted means "up to the latest record". */
+  until?: Date;
+}
+
+/**
+ * Date predicates for a window, verified live against all four endpoints on 2026-10-24.
+ *
+ * Checked per endpoint rather than assumed: `Statuses=` has been silently ignored on three
+ * endpoints in a row, so a filter working in one place says nothing about the next. A date
+ * bound is honoured on /Payments, /BankTransactions, /BatchPayments and /Overpayments — and
+ * on /BatchPayments it works even though `page` is ignored there.
+ */
+/**
+ * 30 days, and the number is arithmetic rather than taste.
+ *
+ * Measured on JENKI 2026-10-24: **32.6 payments/day** and **19.1 bank rows/day**. At 100
+ * records a page that is ~10 and ~6 pages for 30 days, which completes — all four sources
+ * returned `truncated: false` with their oldest record exactly on the window boundary.
+ *
+ * 90 days does NOT work, and this was tried first. It needs ~30 pages of payments and ~18 of
+ * bank rows; at `maxPages: 20` both truncated, so payments reached back only to 21 August
+ * while batch payments and overpayments covered the full window. The date bound was honoured
+ * and the PAGE bound still bit inside it — which reproduces the original defect one level
+ * down: a window that is only partly read is a period figure that is quietly wrong. Worse,
+ * ~48 calls for two sources exceeds Xero's 60/minute budget once the other reads are added,
+ * so it is not merely slow but unservable in a page load.
+ *
+ * To go wider, the window has to be chunked into sub-windows that each complete, or the read
+ * moved off the request path entirely. Raising `maxPages` alone does not fix it.
+ */
+export const RECONCILIATION_WINDOW_DAYS = 30;
+
+/**
+ * The shared window every source in a reconciliation must be asked for.
+ *
+ * `now` is injectable so a test is not at the mercy of the clock.
+ */
+export function recentWindow(
+  days: number = RECONCILIATION_WINDOW_DAYS,
+  now: Date = new Date(),
+): DateWindow {
+  return { since: new Date(now.getTime() - days * 86_400_000) };
+}
+
+function windowClauses(window: DateWindow | undefined): string[] {
+  if (!window) return [];
+  const clauses = [`Date>=${toXeroDateTime(window.since)}`];
+  if (window.until) clauses.push(`Date<${toXeroDateTime(window.until)}`);
+  return clauses;
+}
+
+function andWhere(...clauses: readonly (string | undefined)[]): string {
+  return clauses.filter((clause): clause is string => Boolean(clause)).join("&&");
 }
 
 export interface FetchPaymentsOptions extends FetchPagedOptions {
+  /** Restrict to a shared reporting window. Honoured live — see `windowClauses`. */
+  window?: DateWindow;
   /**
    * Payment statuses to include. Defaults to AUTHORISED only.
    *
@@ -558,7 +643,13 @@ export async function fetchPayments(
         : { success: false, detail: issues(p.error) };
     },
     tenantId,
-    { order: "Date DESC", where: statusWhere(options.statuses ?? ["AUTHORISED"], "/Payments") },
+    {
+      order: "Date DESC",
+      where: andWhere(
+        statusWhere(options.statuses ?? ["AUTHORISED"], "/Payments"),
+        ...windowClauses(options.window),
+      ),
+    },
     options,
   );
 }
@@ -566,6 +657,8 @@ export async function fetchPayments(
 export interface FetchBatchPaymentsOptions {
   /** Batch statuses to include. Defaults to AUTHORISED; DELETED batches are 75 of 1,421. */
   statuses?: readonly string[];
+  /** Restrict to a shared reporting window. Works here despite `page` being ignored. */
+  window?: DateWindow;
 }
 
 /**
@@ -597,7 +690,10 @@ export async function fetchBatchPayments(
     // does not apply, and the next reader would assume this loops.
     searchParams: {
       order: "Date DESC",
-      where: statusWhere(options.statuses ?? ["AUTHORISED"], "/BatchPayments"),
+      where: andWhere(
+        statusWhere(options.statuses ?? ["AUTHORISED"], "/BatchPayments"),
+        ...windowClauses(options.window),
+      ),
     },
   });
   const parsed = BatchPaymentsResponse.safeParse(body);
@@ -607,9 +703,14 @@ export async function fetchBatchPayments(
   return { items: parsed.data.BatchPayments, truncated: false };
 }
 
+export interface FetchUnallocatedCreditOptions extends FetchPagedOptions {
+  /** Restrict to a shared reporting window. */
+  window?: DateWindow;
+}
+
 export async function fetchPrepayments(
   tenantId: string,
-  options: FetchPagedOptions = {},
+  options: FetchUnallocatedCreditOptions = {},
 ): Promise<PagedResult<XeroUnallocatedCredit>> {
   return fetchPaged<XeroUnallocatedCredit>(
     "/Prepayments",
@@ -621,17 +722,18 @@ export async function fetchPrepayments(
         : { success: false, detail: issues(p.error) };
     },
     tenantId,
-    // Deliberately UNFILTERED. VOIDED credits carry a phantom RemainingCredit, but the
-    // normaliser's `creditIsLive` handles that, and PAID records are needed for allocation
-    // history — filtering them out at the fetch would throw away how a credit was consumed.
-    { order: "Date DESC" },
+    // Still deliberately UNFILTERED BY STATUS. VOIDED credits carry a phantom
+    // RemainingCredit, but the normaliser's `creditIsLive` handles that, and PAID records are
+    // needed for allocation history — filtering them out at the fetch would throw away how a
+    // credit was consumed. The date window is a separate axis and is applied.
+    { order: "Date DESC", where: andWhere(...windowClauses(options.window)) || undefined },
     options,
   );
 }
 
 export async function fetchOverpayments(
   tenantId: string,
-  options: FetchPagedOptions = {},
+  options: FetchUnallocatedCreditOptions = {},
 ): Promise<PagedResult<XeroUnallocatedCredit>> {
   return fetchPaged<XeroUnallocatedCredit>(
     "/Overpayments",
@@ -643,8 +745,8 @@ export async function fetchOverpayments(
         : { success: false, detail: issues(p.error) };
     },
     tenantId,
-    // Unfiltered for the same reason as prepayments — see above.
-    { order: "Date DESC" },
+    // Unfiltered by status for the same reason as prepayments — see above.
+    { order: "Date DESC", where: andWhere(...windowClauses(options.window)) || undefined },
     options,
   );
 }
