@@ -413,3 +413,47 @@ describe("allocations and draw-down — was this credit consumed?", () => {
     expect(normaliseBatchPayment(LIVE_BATCH, options).drawnDownByPaymentIds).toEqual([]);
   });
 });
+
+describe("payment types that only the live data revealed", () => {
+  const typed = (PaymentType: string) =>
+    normalisePayment({ PaymentID: "p", PaymentType, Amount: 1 } as XeroPayment, options);
+
+  it("ARCREDITPAYMENT is OUTFLOW — a refund, not a receipt", () => {
+    // The trap: "AR" reads as receivable, which reads as money in. It is backwards. These
+    // records carry Invoice.Type = ACCRECCREDIT with a CN- number -- the Invoice field holds a
+    // CREDIT NOTE, and paying a customer's credit note rather than allocating it is a refund.
+    // 72 of the 1,000 payments in JENKI's live window are this type.
+    expect(typed("ARCREDITPAYMENT").direction).toBe("OUTFLOW");
+  });
+
+  it("APCREDITPAYMENT is INFLOW — the mirror, a supplier refunding us", () => {
+    expect(typed("APCREDITPAYMENT").direction).toBe("INFLOW");
+  });
+
+  it("does not let the ACCREC/ACCPAY prefix rule capture the credit-payment types", () => {
+    // Guards the ordering inside toPaymentDirection: if the generic prefix rules ever move
+    // above the exact matches, both of these flip and the error is a sign error in cash.
+    expect(typed("ARCREDITPAYMENT").direction).not.toBe(typed("ACCRECPAYMENT").direction);
+    expect(typed("APCREDITPAYMENT").direction).not.toBe(typed("ACCPAYPAYMENT").direction);
+  });
+
+  it("handles the overpayment/prepayment vocabulary, which is the BANK one", () => {
+    // 5e35cd7 assumed ACCREC*/ACCPAY* prefixes here from documentation. Live overpayments use
+    // SPEND-/RECEIVE-, so all 534 of JENKI's failed to normalise -- collected as failures
+    // rather than thrown, so the reconciliation simply reported totals without them.
+    const credit = (Type: string) =>
+      normaliseUnallocatedCredit(
+        { OverpaymentID: "o", Type, Total: 1, CurrencyCode: "GBP" } as XeroUnallocatedCredit,
+        "OVERPAYMENT",
+        options,
+      );
+    expect(credit("SPEND-OVERPAYMENT").direction).toBe("OUTFLOW");
+    expect(credit("RECEIVE-OVERPAYMENT").direction).toBe("INFLOW");
+    expect(credit("SPEND-PREPAYMENT").direction).toBe("OUTFLOW");
+    expect(credit("RECEIVE-PREPAYMENT").direction).toBe("INFLOW");
+  });
+
+  it("still refuses a genuinely unknown type rather than defaulting it", () => {
+    expect(() => typed("SOMETHING-NEW")).toThrow(/Unrecognised Xero payment type/);
+  });
+});

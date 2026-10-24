@@ -49,6 +49,15 @@ export interface NormalisedBankTransaction {
   counterpartyName: string | null;
   counterpartyExternalId: string | null;
   /** The ledger account the money moved through. Not the account number — that is PII. */
+  /**
+   * The overpayment or prepayment this bank row represents, where it represents one.
+   *
+   * Non-null means this row's money ALSO appears on /Overpayments or /Prepayments. Summing
+   * the bank read and those endpoints together counts it twice, and the primary keys differ,
+   * so this is the only field that reveals the overlap.
+   */
+  overpaymentExternalId: string | null;
+  prepaymentExternalId: string | null;
   bankAccountExternalId: string | null;
   bankAccountName: string | null;
   bankAccountCode: string | null;

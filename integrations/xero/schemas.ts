@@ -163,6 +163,15 @@ export const XeroBankTransaction = z
     Status: z.string().optional(),
     Reference: z.string().optional(),
     IsReconciled: z.boolean().optional(),
+    /**
+     * Set when this bank row IS an overpayment or prepayment that also appears on
+     * /Overpayments or /Prepayments. Verified live: all 100 sampled SPEND-OVERPAYMENT rows
+     * carried an OverpaymentID, and 17 of them sit inside the 1,000-row window production
+     * already reads. The BankTransactionID is a DIFFERENT id, so this link field is the only
+     * safe dedupe key — matching on primary keys would never find the overlap.
+     */
+    OverpaymentID: z.string().optional(),
+    PrepaymentID: z.string().optional(),
     Contact: XeroContact.optional(),
     BankAccount: XeroBankAccountRef.optional(),
     Date: XeroDate.optional(),

@@ -156,6 +156,8 @@ export function normaliseBankTransaction(
     isReconciled: transaction.IsReconciled ?? false,
     counterpartyName: transaction.Contact?.Name ?? null,
     counterpartyExternalId: transaction.Contact?.ContactID ?? null,
+    overpaymentExternalId: transaction.OverpaymentID ?? null,
+    prepaymentExternalId: transaction.PrepaymentID ?? null,
     bankAccountExternalId: transaction.BankAccount?.AccountID ?? null,
     bankAccountName: transaction.BankAccount?.Name ?? null,
     bankAccountCode: transaction.BankAccount?.Code ?? null,
@@ -227,6 +229,28 @@ function toAllocations(
  * same ACCREC/ACCPAY prefixes.
  */
 function toPaymentDirection(type: string): CommitmentDirection {
+  // CREDIT-NOTE PAYMENTS REVERSE THE DIRECTION OF THEIR PREFIX, so they are matched first.
+  //
+  // ARCREDITPAYMENT is Accounts Receivable CREDIT. The instinct is "receivable, therefore
+  // money in", and that is backwards. Verified on JENKI 2026-10-24: these records carry
+  // `Invoice.Type = "ACCRECCREDIT"` with a CN- document number — the "Invoice" field holds a
+  // credit note. A credit note to a customer, when PAID rather than allocated against an
+  // invoice, is a refund: cash leaves. 72 of the 1,000 payments in the live window are this
+  // type, and a prefix rule would have put every one of them on the wrong side.
+  //
+  // APCREDITPAYMENT is the mirror — a supplier refunding us — so cash arrives. None occur in
+  // JENKI's window; it is here by symmetry and will throw as loudly as anything else if the
+  // assumption is wrong, because the direction is asserted, not defaulted.
+  if (type === "ARCREDITPAYMENT") return "OUTFLOW";
+  if (type === "APCREDITPAYMENT") return "INFLOW";
+
+  // Overpayments and prepayments use the BANK TRANSACTION vocabulary, not the invoice one:
+  // SPEND-OVERPAYMENT, RECEIVE-OVERPAYMENT, and the prepayment equivalents. 5e35cd7 assumed
+  // ACCREC*/ACCPAY* prefixes here from documentation, so every one of JENKI's 534 overpayments
+  // failed to normalise — silently, since a failure is collected rather than thrown.
+  if (type.startsWith("SPEND")) return "OUTFLOW";
+  if (type.startsWith("RECEIVE")) return "INFLOW";
+
   if (type.startsWith("ACCREC") || type === "RECBATCH") return "INFLOW";
   if (type.startsWith("ACCPAY") || type === "PAYBATCH") return "OUTFLOW";
   throw new Error(`Unrecognised Xero payment type "${type}"`);

@@ -254,6 +254,61 @@ Record counts: **Payments 24,520 · BatchPayments 1,421 · Overpayments 534 · P
 - **`/Prepayments` is genuinely empty for JENKI** — 0 records, and 0 bank transactions of type
   SPEND-PREPAYMENT or RECEIVE-PREPAYMENT. Unsurveyable, and nothing is lost by deferring it.
 
+## CROSS-ENDPOINT RECONCILIATION — built 2026-10-24, `integrations/xero/reconcile.ts`
+
+Pure function, unwired. Every input record lands in exactly one bucket — counted, or excluded
+with a named reason — and `tiesOut` proves that arithmetically rather than asking to be
+trusted. **Live figures, JENKI, 2026-10-24:**
+
+| Counted (after dedupe) | Records | Amount |
+|---|---|---|
+| BATCH_PAYMENT | 1,346 | 5,454,767.65 GBP |
+| BANK_TRANSACTION | 354 | 1,398,623.11 GBP · 253.27 USD |
+| PAYMENT | 404 | 725,075.70 GBP |
+| OVERPAYMENT | 465 | 128,545.83 GBP |
+
+| Excluded (itemised) | Records | Amount |
+|---|---|---|
+| BANK · INTERNAL_TRANSFER | 629 | 2,235,891.67 GBP |
+| PAYMENT · BATCH_MEMBER | 596 | 650,877.34 GBP |
+| OVERPAYMENT · CANCELLED | 69 | 32,918.57 GBP |
+| BANK · OVERPAYMENT_ALREADY_IN_BANK | 17 | 1,231.44 GBP |
+
+Movement: **IN 3,501,847.09 GBP / OUT 4,205,165.20 GBP + 253.27 USD**. Committed (outstanding
+invoices, deliberately NOT in movement): IN 71,707.30 GBP / OUT 298,935.09 GBP + 4,171.50 USD.
+Available credit (`creditIsLive` only): **1,170.79 GBP**. `tiesOut: true`, 0 discrepancies.
+
+**THE NUMBER THAT IS NOT YET USABLE: net movement.** Three design facts make it so, and all
+three are reported rather than hidden:
+1. **The sources cover different periods.** BatchPayments (1,346) and Overpayments (534) are
+   COMPLETE. Payments is the most recent **1,000 of 24,520**, and BankTransactions the most
+   recent 1,000. So the batch total spans years of history while the payment total spans
+   months. Adding them gives a figure with no coherent period. `reconcile` now takes the
+   `truncated` sources and warns per source. **Date-bounded reads across all five with one
+   shared window are the fix, and the next real build.**
+2. Invoices are reported separately and never added to movement. An invoice is an obligation,
+   a payment is its settlement; summing both counts the same money twice.
+3. Transfers are excluded, not netted — 629 rows, 2.24M GBP, visible as its own line.
+
+**Two defects the live run exposed, both now fixed:**
+- **All 534 overpayments silently failed to normalise.** `toPaymentDirection` assumed
+  ACCREC*/ACCPAY* prefixes from documentation; live overpayments use the BANK vocabulary,
+  `SPEND-OVERPAYMENT`/`RECEIVE-OVERPAYMENT`. Failures are collected, not thrown, so the first
+  reconciliation reported **`tiesOut: true` over a set missing every overpayment**.
+  `reconcile` now takes `failures` per source and a non-zero count breaks `tiesOut` —
+  arithmetic over what arrived can balance perfectly while whole endpoints are absent.
+- **`ARCREDITPAYMENT` is OUTFLOW, which is the opposite of what the prefix suggests.** 72 of
+  1,000 live payments. These carry `Invoice.Type = ACCRECCREDIT` with a `CN-` number — the
+  `Invoice` field holds a CREDIT NOTE, and paying a customer's credit note rather than
+  allocating it is a refund, so cash leaves. Reading "AR" as receivable and therefore inflow
+  would have put 72 records on the wrong side of the forecast. `APCREDITPAYMENT` is the mirror
+  (INFLOW), included by symmetry and asserted, not defaulted.
+
+Dedupe keys in use: `batchExternalId`/`memberPaymentIds` (payments↔batches, both directions),
+`overpaymentExternalId` on bank rows (bank↔overpayments — matched on the LINK field, since the
+primary keys differ), `providerType.endsWith("-TRANSFER")` (transfers), and
+`amountIsLive`/`creditIsLive` for cancelled records.
+
 ## Known gate (confirmed Oct 2026 — don't re-litigate)
 
 Xero's `/Journals` endpoint now requires the Advanced pricing tier (~$1,445 AUD/month) plus a
