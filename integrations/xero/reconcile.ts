@@ -48,6 +48,38 @@ export interface ExclusionTotal extends SourceTotal {
   reason: ExclusionReason;
 }
 
+/**
+ * A named slice of the reconciled span, for period-over-period comparison.
+ *
+ * Periods exist because subtracting two reconciliations is NOT arithmetic, however obvious it
+ * looks. Two separate reads end at two different "now"s, so transactions land between them;
+ * and each read dedupes independently, so a batch counted in the wider window can have its
+ * member payments excluded in the narrower one. Attributing a SINGLE deduped set to periods
+ * avoids both: one read, one dedupe, slices that sum exactly to the whole.
+ */
+export interface ReconciliationPeriod {
+  label: string;
+  /**
+   * Inclusive, ISO 8601, and it must be DAY-ALIGNED.
+   *
+   * `toXeroDateTime` truncates a fetch bound to midnight UTC, so every record on a boundary
+   * day arrives with a 00:00 timestamp. A period bound carrying a time of day therefore sits
+   * AFTER those records and pushes a whole day into the wrong slice — observed on the first
+   * live run as 13 records and £14,822 landing in `unattributed`. Prefer a date-only string
+   * (`"2026-09-24"`), which compares correctly against a full ISO timestamp.
+   */
+  since: string;
+  /** Exclusive, ISO 8601, day-aligned for the same reason. Omitted means "to the end". */
+  until?: string;
+}
+
+export interface PeriodMovement {
+  label: string;
+  movement: Record<CommitmentDirection, Money[]>;
+  /** Counted records attributed to this period. */
+  count: number;
+}
+
 export interface Reconciliation {
   /** Cash that moved, per direction, grouped by currency. */
   movement: Record<CommitmentDirection, Money[]>;
@@ -68,6 +100,16 @@ export interface Reconciliation {
    * `creditIsLive`, because VOIDED records keep a stale `remainingCredit`.
    */
   availableCredit: Money[];
+  /**
+   * Counted cash movement sliced by period, when periods were supplied.
+   *
+   * Derived from the SAME deduped set as `movement`, so the slices sum to it exactly —
+   * including `unattributed`, which holds counted records falling outside every period rather
+   * than letting them disappear from the breakdown.
+   */
+  byPeriod: PeriodMovement[];
+  /** Counted records that fell in no supplied period. Null when every one was attributed. */
+  unattributed: PeriodMovement | null;
   /**
    * True when, for every source, counted + excluded equals everything that came in — by
    * record count and by amount, in every currency.
@@ -108,6 +150,11 @@ export interface ReconciliationInput {
    * failed on an unrecognised type, and the reconciliation reported tiesOut: true over a set
    * that silently excluded every one of them.
    */
+  /**
+   * Optional period slices. Supply them in the order you want them reported; overlapping
+   * periods would double-count, so the FIRST match wins and that is deliberate.
+   */
+  periods?: readonly ReconciliationPeriod[];
   failures?: readonly SourceFailures[];
   /**
    * Sources whose read hit its page bound, so more records exist than were seen.
@@ -170,6 +217,45 @@ export function reconcile(input: ReconciliationInput): Reconciliation {
   };
   const credit = new CurrencyBucket();
   const discrepancies: string[] = [];
+
+  // Period buckets, built once so attribution is a lookup rather than a second pass over the
+  // data. `unattributed` exists so the slices always sum to `movement`: a counted record that
+  // matches no period is reported, never dropped.
+  const periods = input.periods ?? [];
+  const periodBuckets = periods.map((period) => ({
+    period,
+    buckets: {
+      INFLOW: new CurrencyBucket(),
+      OUTFLOW: new CurrencyBucket(),
+    } as Record<CommitmentDirection, CurrencyBucket>,
+    count: 0,
+  }));
+  const unattributedBuckets = {
+    INFLOW: new CurrencyBucket(),
+    OUTFLOW: new CurrencyBucket(),
+  } as Record<CommitmentDirection, CurrencyBucket>;
+  let unattributedCount = 0;
+
+  const attribute = (occurredAt: string | null, amount: Money, direction: CommitmentDirection) => {
+    if (periods.length === 0) return;
+    // FIRST match wins. Overlapping periods would otherwise double-count, and a silent
+    // double-count is the one outcome this whole module exists to prevent.
+    const hit = periodBuckets.find(
+      ({ period }) =>
+        occurredAt !== null &&
+        occurredAt >= period.since &&
+        (period.until === undefined || occurredAt < period.until),
+    );
+    if (hit) {
+      hit.buckets[direction].addMoney(amount);
+      hit.count += 1;
+      return;
+    }
+    // Includes records with no date at all: undated money is still money, and hiding it in a
+    // period it cannot be shown to belong to would be worse than reporting it unattributed.
+    unattributedBuckets[direction].addMoney(amount);
+    unattributedCount += 1;
+  };
   const warnings: string[] = [];
 
   const bucketFor = (map: Map<ReconciliationSource, CurrencyBucket>, source: ReconciliationSource) => {
@@ -187,9 +273,15 @@ export function reconcile(input: ReconciliationInput): Reconciliation {
     excluded.set(key, entry);
   };
 
-  const count = (source: ReconciliationSource, amount: Money, direction: CommitmentDirection) => {
+  const count = (
+    source: ReconciliationSource,
+    amount: Money,
+    direction: CommitmentDirection,
+    occurredAt: string | null,
+  ) => {
     bucketFor(counted, source).addMoney(amount);
     movement[direction].addMoney(amount);
+    attribute(occurredAt, amount, direction);
   };
 
   // --- batch payments ------------------------------------------------------
@@ -204,7 +296,7 @@ export function reconcile(input: ReconciliationInput): Reconciliation {
     }
     countedBatchIds.add(batch.externalId);
     for (const id of batch.memberPaymentIds) batchMemberIds.add(id);
-    count("BATCH_PAYMENT", batch.amount, batch.direction);
+    count("BATCH_PAYMENT", batch.amount, batch.direction, batch.paidAt);
   }
 
   // --- individual payments ------------------------------------------------
@@ -236,7 +328,7 @@ export function reconcile(input: ReconciliationInput): Reconciliation {
         `Payment ${payment.externalId} names batch ${payment.batchExternalId}, which is not in this read — counted individually, so it may double-count if that batch is read separately.`,
       );
     }
-    count("PAYMENT", amount, payment.direction);
+    count("PAYMENT", amount, payment.direction, payment.paidAt);
   }
 
   // --- unallocated credit -------------------------------------------------
@@ -254,7 +346,7 @@ export function reconcile(input: ReconciliationInput): Reconciliation {
         exclude(source, "CANCELLED", record.amount);
         continue;
       }
-      count(source, record.amount, record.direction);
+      count(source, record.amount, record.direction, record.paidAt);
       // Separate from movement: this is money sitting unapplied, not money that moved today.
       if (record.creditIsLive) credit.addMoney(record.remainingCredit);
     }
@@ -288,7 +380,7 @@ export function reconcile(input: ReconciliationInput): Reconciliation {
       continue;
     }
 
-    count("BANK_TRANSACTION", transaction.total, transaction.direction);
+    count("BANK_TRANSACTION", transaction.total, transaction.direction, transaction.bookedAt);
   }
 
   // --- commitments, reported but never added to movement -------------------
@@ -361,6 +453,22 @@ export function reconcile(input: ReconciliationInput): Reconciliation {
       .sort((a, b) => `${a.source}${a.reason}`.localeCompare(`${b.source}${b.reason}`)),
     committed: { INFLOW: committed.INFLOW.byCurrency, OUTFLOW: committed.OUTFLOW.byCurrency },
     availableCredit: credit.byCurrency,
+    byPeriod: periodBuckets.map(({ period, buckets, count: n }) => ({
+      label: period.label,
+      movement: { INFLOW: buckets.INFLOW.byCurrency, OUTFLOW: buckets.OUTFLOW.byCurrency },
+      count: n,
+    })),
+    unattributed:
+      unattributedCount === 0
+        ? null
+        : {
+            label: "unattributed",
+            movement: {
+              INFLOW: unattributedBuckets.INFLOW.byCurrency,
+              OUTFLOW: unattributedBuckets.OUTFLOW.byCurrency,
+            },
+            count: unattributedCount,
+          },
     tiesOut: discrepancies.length === 0,
     discrepancies,
     warnings,

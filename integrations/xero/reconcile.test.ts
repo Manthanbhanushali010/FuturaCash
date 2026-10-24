@@ -410,3 +410,204 @@ describe("bounded reads are stated, not inferred", () => {
     expect(reconcile({ ...EMPTY, payments: [payment()] }).warnings).toEqual([]);
   });
 });
+
+describe("period slices — because subtracting two reconciliations is not arithmetic", () => {
+  /**
+   * Two separate reads end at two different "now"s, so records land between them; and each
+   * read dedupes independently, so a batch counted in the wider window can have its members
+   * excluded in the narrower one. Slicing ONE deduped set avoids both.
+   */
+  const RECENT = { label: "last 30 days", since: "2026-09-24" };
+  const PRIOR = { label: "prior 60 days", since: "2026-07-26", until: "2026-09-24" };
+
+  const at = (paidAt: string, over: Partial<NormalisedProviderPayment> = {}) =>
+    payment({ externalId: `p-${paidAt}-${Math.random()}`, paidAt, ...over });
+
+  it("attributes each counted record to the period containing its own date", () => {
+    const result = reconcile({
+      ...EMPTY,
+      payments: [at("2026-10-01"), at("2026-08-15")],
+      periods: [RECENT, PRIOR],
+    });
+    expect(result.byPeriod.map((p) => p.label)).toEqual(["last 30 days", "prior 60 days"]);
+    expect(result.byPeriod[0]!.count).toBe(1);
+    expect(result.byPeriod[1]!.count).toBe(1);
+    expect(result.byPeriod[0]!.movement.OUTFLOW).toEqual([money(10000, "GBP")]);
+    expect(result.byPeriod[1]!.movement.OUTFLOW).toEqual([money(10000, "GBP")]);
+  });
+
+  it("slices sum EXACTLY to the overall movement", () => {
+    // The property that makes a breakdown trustworthy: no leakage between the parts and the
+    // whole, which subtraction across two reads cannot guarantee.
+    const result = reconcile({
+      ...EMPTY,
+      payments: [at("2026-10-01"), at("2026-10-05"), at("2026-08-15"), at("2026-07-30")],
+      periods: [RECENT, PRIOR],
+    });
+    const sliced = result.byPeriod.reduce(
+      (total, p) => total + (p.movement.OUTFLOW[0]?.minor ?? 0),
+      0,
+    );
+    expect(sliced).toBe(result.movement.OUTFLOW[0]!.minor);
+    expect(result.unattributed).toBeNull();
+  });
+
+  it("respects the exclusive upper bound — a boundary record lands in the newer period", () => {
+    // PRIOR is listed FIRST deliberately. With RECENT first, first-match returns before
+    // PRIOR's upper bound is ever evaluated, so the test would pass whether the bound were
+    // exclusive or inclusive -- it would prove ordering, not exclusivity.
+    const result = reconcile({ ...EMPTY, payments: [at("2026-09-24")], periods: [PRIOR, RECENT] });
+    expect(result.byPeriod[0]!.label).toBe("prior 60 days");
+    expect(result.byPeriod[0]!.count).toBe(0);
+    expect(result.byPeriod[1]!.count).toBe(1);
+  });
+
+  it("compares a full ISO timestamp correctly against a date-only bound", () => {
+    // Real records carry "2026-09-24T00:00:00.000Z"; the bounds are written as dates. String
+    // comparison has to put midnight ON the 24th inside the period starting the 24th, and
+    // outside the one ending the 24th.
+    const midnight = at("2026-09-24T00:00:00.000Z");
+    const result = reconcile({ ...EMPTY, payments: [midnight], periods: [PRIOR, RECENT] });
+    expect(result.byPeriod[0]!.count).toBe(0);
+    expect(result.byPeriod[1]!.count).toBe(1);
+    expect(result.unattributed).toBeNull();
+  });
+
+  it("gives the FIRST matching period, so overlapping periods cannot double-count", () => {
+    const overlapping = [
+      { label: "a", since: "2026-07-26" },
+      { label: "b", since: "2026-07-26" },
+    ];
+    const result = reconcile({ ...EMPTY, payments: [at("2026-10-01")], periods: overlapping });
+    expect(result.byPeriod[0]!.count).toBe(1);
+    expect(result.byPeriod[1]!.count).toBe(0);
+    // Still sums to the whole, which is what the first-match rule protects.
+    expect(result.byPeriod[0]!.movement.OUTFLOW[0]!.minor).toBe(
+      result.movement.OUTFLOW[0]!.minor,
+    );
+  });
+
+  it("reports a record outside every period as unattributed, never dropping it", () => {
+    const result = reconcile({
+      ...EMPTY,
+      payments: [at("2026-10-01"), at("2026-01-01")],
+      periods: [RECENT, PRIOR],
+    });
+    expect(result.unattributed!.count).toBe(1);
+    expect(result.unattributed!.movement.OUTFLOW).toEqual([money(10000, "GBP")]);
+    const sliced =
+      result.byPeriod.reduce((t, p) => t + (p.movement.OUTFLOW[0]?.minor ?? 0), 0) +
+      result.unattributed!.movement.OUTFLOW[0]!.minor;
+    expect(sliced).toBe(result.movement.OUTFLOW[0]!.minor);
+  });
+
+  it("treats an undated record as unattributed rather than guessing a period", () => {
+    const result = reconcile({
+      ...EMPTY,
+      payments: [payment({ paidAt: null })],
+      periods: [RECENT, PRIOR],
+    });
+    expect(result.unattributed!.count).toBe(1);
+  });
+
+  it("slices only COUNTED records — excluded ones stay out of every period", () => {
+    // A batch member excluded as a duplicate must not reappear inside a period slice.
+    const batch = payment({
+      externalId: "b-1",
+      source: "BATCH_PAYMENT",
+      providerType: "PAYBATCH",
+      paidAt: "2026-10-01",
+      memberPaymentIds: ["p-member"],
+    });
+    const member = payment({ externalId: "p-member", paidAt: "2026-10-01" });
+    const result = reconcile({
+      ...EMPTY,
+      batchPayments: [batch],
+      payments: [member],
+      periods: [RECENT, PRIOR],
+    });
+    expect(result.byPeriod[0]!.count).toBe(1); // the batch only
+    expect(result.byPeriod[0]!.movement.OUTFLOW).toEqual([money(10000, "GBP")]);
+  });
+
+  it("keeps bank transactions in their period by bookedAt", () => {
+    const result = reconcile({
+      ...EMPTY,
+      bankTransactions: [bank({ bookedAt: "2026-08-02" })],
+      periods: [RECENT, PRIOR],
+    });
+    expect(result.byPeriod[1]!.count).toBe(1);
+    expect(result.byPeriod[1]!.movement.OUTFLOW).toEqual([money(5000, "GBP")]);
+  });
+
+  it("reports nothing per-period when no periods are supplied", () => {
+    const result = reconcile({ ...EMPTY, payments: [at("2026-10-01")] });
+    expect(result.byPeriod).toEqual([]);
+    expect(result.unattributed).toBeNull();
+  });
+
+  it("keeps currencies separate inside a period", () => {
+    const usd = at("2026-10-01", {
+      currency: "USD",
+      amount: money(5000, "USD"),
+      bankAmount: money(5000, "USD"),
+    });
+    const result = reconcile({ ...EMPTY, payments: [at("2026-10-01"), usd], periods: [RECENT] });
+    expect(result.byPeriod[0]!.movement.OUTFLOW).toEqual([
+      money(10000, "GBP"),
+      money(5000, "USD"),
+    ]);
+  });
+});
+
+describe("period bounds must be day-aligned to match the fetch bounds", () => {
+  /**
+   * The fetch truncates its date bound to midnight UTC, so a record on a boundary day arrives
+   * stamped 00:00. A period bound carrying a time of day sits after it and silently moves a
+   * whole day into the neighbouring slice. This was caught on a live run, not in review: 13
+   * records and £14,822 appeared in `unattributed`, which is the only reason it was visible.
+   */
+  const dated = (paidAt: string) => payment({ externalId: `p-${paidAt}`, paidAt });
+
+  it("attributes a midnight record correctly when bounds are date-only", () => {
+    const result = reconcile({
+      ...EMPTY,
+      payments: [dated("2026-09-24T00:00:00.000Z")],
+      periods: [
+        { label: "recent", since: "2026-09-24" },
+        { label: "prior", since: "2026-07-26", until: "2026-09-24" },
+      ],
+    });
+    expect(result.byPeriod[0]!.count).toBe(1);
+    expect(result.unattributed).toBeNull();
+  });
+
+  it("MISATTRIBUTES it when the bound carries a time of day — the bug, pinned", () => {
+    // Documenting the failure mode rather than pretending the comparison is time-safe. A
+    // midnight record is BEFORE a same-day 16:57 boundary, so it falls out of both periods.
+    const result = reconcile({
+      ...EMPTY,
+      payments: [dated("2026-09-24T00:00:00.000Z")],
+      periods: [
+        { label: "recent", since: "2026-09-24T16:57:00.000Z" },
+        { label: "prior", since: "2026-07-26T16:57:00.000Z", until: "2026-09-24T16:57:00.000Z" },
+      ],
+    });
+    expect(result.byPeriod[0]!.count).toBe(0);
+    expect(result.byPeriod[1]!.count).toBe(1);
+    // The record is not lost — it lands in `prior`, one slice away from where it belongs.
+    // That is the whole hazard: plausible totals, wrong period.
+    expect(result.unattributed).toBeNull();
+  });
+
+  it("surfaces a boundary record that falls outside EVERY timed period", () => {
+    // The oldest chunk's first day: fetched at midnight, but after a timed lower bound.
+    const result = reconcile({
+      ...EMPTY,
+      payments: [dated("2026-07-26T00:00:00.000Z")],
+      periods: [{ label: "prior", since: "2026-07-26T16:57:00.000Z" }],
+    });
+    expect(result.unattributed!.count).toBe(1);
+    expect(result.byPeriod[0]!.count).toBe(0);
+  });
+});

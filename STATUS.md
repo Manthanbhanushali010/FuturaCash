@@ -349,9 +349,33 @@ Three independent corroborations:
 - **Chunking recovered what the single 90-day window lost**: 2,758 payments vs 2,000 truncated,
   2,074 bank rows vs 2,000 truncated. That is the defect this fixes, measured.
 
-**Period comparison worth knowing**: the last 30 days is **+131,092.61 GBP** while the full 90
-is **−31,005.63 GBP** — so the preceding 60 days were about **−162,098 GBP**. The recent month
-is markedly better than the quarter, which is the kind of thing a single net figure hides.
+**PERIOD SLICES — reported, not inferred (2026-10-24).** `reconcile` takes an optional
+`periods` list and slices the COUNTED set by each record's own date, from one read and one
+dedupe. Live, over the same 90-day chunked read:
+
+| Period | Records | IN | OUT | NET |
+|---|---|---|---|---|
+| last 30 days | 608 | 1,335,588.62 | 1,204,496.01 GBP · 115.39 USD | **+131,092.61 GBP** |
+| prior 60 days | 1,688 | 2,198,247.56 | 2,360,345.80 GBP · 271.85 USD | **−162,098.24 GBP** |
+| unattributed | 0 | — | — | — |
+
+Slices sum to the whole **exactly** — GBP, USD, and record counts (2,296 = 2,296). So the
+recent month is markedly better than the quarter, which a single net figure hides.
+
+These confirm the earlier subtraction to the penny. The subtraction was reasoned to be unsound
+(two reads end at different "now"s; each dedupes independently) and in principle it can
+diverge — but on this data it did not, so the slices are reassurance rather than a correction.
+
+**THE REAL FIND: period bounds must be DAY-ALIGNED.** `toXeroDateTime` truncates a fetch bound
+to midnight UTC, so every record on a boundary day arrives stamped 00:00. The first live run
+passed full timestamps (16:57) as period bounds, which sit AFTER those records: a whole day
+slid into the neighbouring slice and the 30-day net came out £62k wrong (+193,439.59). **The
+`unattributed` bucket is the only reason it was visible** — 13 records and £14,822 appeared
+there, which is what prompted the check. Pinned by three tests, including one that documents
+the misattribution rather than pretending the comparison is time-safe.
+
+Overlapping periods take the FIRST match, deliberately: anything else double-counts.
+Undated records go to `unattributed` rather than being guessed into a period.
 
 Rate limiting: ~1,100ms between source fetches, ~15s between chunks, and a 429 backs off
 (honouring `Retry-After`) and retries THAT chunk rather than abandoning the read. Mutation
