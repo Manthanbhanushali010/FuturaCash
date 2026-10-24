@@ -311,7 +311,61 @@ pairs came out identical to the penny, which no amount of code review could esta
 - OVERPAYMENT counted **930.79** = BANK·OVERPAYMENT_ALREADY_IN_BANK excluded **930.79**, 13
   records each way.
 
-**WHY 30 AND NOT 90.** Measured: **32.6 payments/day, 19.1 bank rows/day**. At 100 per page
+## CHUNKED READS — built 2026-10-24, `integrations/xero/chunked-read.ts`
+
+`readChunked(tenantId, { days })` walks backwards in **fixed 30-day chunks**, fetching all four
+sources per chunk with the date-bounded `where=` already built, merging each source across
+chunks, and treating ANY truncation in ANY source of ANY chunk as a **hard failure**: the
+chunk's records are discarded, extending further back stops, and `stoppedAt` names the window
+and which sources truncated. Unwired.
+
+**Chunk size is the measured-safe 30 and is NOT derived from record density.** Computing an
+"optimal" size per endpoint is the same reasoning that produced the 90-day failure — correct on
+one day's volumes, silently wrong the week JENKI gets busier. A test pins that a dense stub and
+a sparse stub produce the same number of chunks.
+
+**LIVE RESULT — 90 days in three chunks, 96s, zero 429 retries:**
+
+| Chunk | Span | Status | pay / bank / batch / over |
+|---|---|---|---|
+| #1 | 2026-09-24 → today | COMPLETE | 1042 / 553 / 26 / 13 |
+| #2 | 2026-08-25 → 2026-09-24 | COMPLETE | 745 / 799 / 24 / 10 |
+| #3 | 2026-07-26 → 2026-08-25 | COMPLETE | 971 / 722 / 25 / 16 |
+
+Requested 90d, complete **90d**, `all complete: true`. Merged: 2,758 payments · 2,074 bank ·
+75 batches · 39 overpayments. **0 duplicate ids across chunk boundaries** — the chunks abut
+exactly (`since` inclusive, `until` exclusive). 0 normalisation failures.
+
+**NET MOVEMENT, 90 days: IN 3,533,836.18 GBP / OUT 3,564,841.81 GBP → −31,005.63 GBP**
+(and −387.24 USD). `tiesOut: true`, 0 discrepancies, **0 warnings**. Available credit
+1,170.79 GBP.
+
+Three independent corroborations:
+- **The exact-penny ties hold at 90 days too.** BATCH_PAYMENT counted **1,414,191.06** =
+  PAYMENT·BATCH_MEMBER excluded **1,414,191.06**. OVERPAYMENT counted **3,186.30** =
+  BANK·OVERPAYMENT_ALREADY_IN_BANK excluded **3,186.30**, 39 records each way.
+- **Chunk #1 reproduces the standalone 30-day run exactly** (1042/553/26/13), so the chunked
+  reader and the single-window read agree on the overlapping span.
+- **Chunking recovered what the single 90-day window lost**: 2,758 payments vs 2,000 truncated,
+  2,074 bank rows vs 2,000 truncated. That is the defect this fixes, measured.
+
+**Period comparison worth knowing**: the last 30 days is **+131,092.61 GBP** while the full 90
+is **−31,005.63 GBP** — so the preceding 60 days were about **−162,098 GBP**. The recent month
+is markedly better than the quarter, which is the kind of thing a single net figure hides.
+
+Rate limiting: ~1,100ms between source fetches, ~15s between chunks, and a 429 backs off
+(honouring `Retry-After`) and retries THAT chunk rather than abandoning the read. Mutation
+tested — see below.
+
+Mutations verified to fail: truncation downgraded to a warning (3 tests), upper bound put on the
+newest chunk so today's records drop (1), 429 retry removed (2), pacing removed (1),
+`Retry-After` ignored (1), chunk size derived from the request instead of fixed (10). One
+mutation PASSED and exposed redundant code of mine rather than a bug — a second
+discard guard inside the chunk reader was unreachable because the caller already stops before
+merging. It was removed rather than papered over with a test; the discard is covered via the
+caller, verified by mutating the merge to happen before the break.
+
+**WHY 30 AND NOT 90 IN A SINGLE WINDOW.** Measured: **32.6 payments/day, 19.1 bank rows/day**. At 100 per page
 that is ~10 and ~6 pages for 30 days. 90 days needs ~30 and ~18 — tried first, and at
 `maxPages: 20` both truncated, so payments reached back only to 21 August while batch payments
 and overpayments covered the full window. **The date bound was honoured and the PAGE bound
