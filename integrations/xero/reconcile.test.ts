@@ -611,3 +611,182 @@ describe("period bounds must be day-aligned to match the fetch bounds", () => {
     expect(result.byPeriod[0]!.count).toBe(0);
   });
 });
+
+describe("requirement 6 — does each batch equal the members removed for it?", () => {
+  const batchOf = (amountMinor: number, memberIds: string[]) =>
+    payment({
+      externalId: "b-1",
+      source: "BATCH_PAYMENT",
+      providerType: "PAYBATCH",
+      paidAt: "2026-10-01",
+      amount: money(amountMinor, "GBP"),
+      bankAmount: money(amountMinor, "GBP"),
+      memberPaymentIds: memberIds,
+    });
+  const memberOf = (id: string, amountMinor: number) =>
+    payment({
+      externalId: id,
+      paidAt: "2026-10-01",
+      amount: money(amountMinor, "GBP"),
+      bankAmount: money(amountMinor, "GBP"),
+      batchExternalId: "b-1",
+    });
+
+  it("MUST BE EMPTY when members sum exactly to the batch", () => {
+    // The live property: 619 excluded members summed to the 26 batch totals to the penny.
+    const result = reconcile({
+      ...EMPTY,
+      batchPayments: [batchOf(30000, ["m-1", "m-2"])],
+      payments: [memberOf("m-1", 10000), memberOf("m-2", 20000)],
+    });
+    expect(result.batchMismatches).toEqual([]);
+    expect(result.batchesWithMembersOutsideWindow).toEqual([]);
+    expect(result.tiesOut).toBe(true);
+  });
+
+  it("reports a REAL mismatch when all members are present and still disagree", () => {
+    const result = reconcile({
+      ...EMPTY,
+      batchPayments: [batchOf(30000, ["m-1", "m-2"])],
+      payments: [memberOf("m-1", 10000), memberOf("m-2", 15000)],
+    });
+    expect(result.batchesWithMembersOutsideWindow).toEqual([]);
+    expect(result.batchMismatches).toHaveLength(1);
+    expect(result.batchMismatches[0]).toMatchObject({
+      batchExternalId: "b-1",
+      batchAmount: money(30000, "GBP"),
+      memberAmount: money(25000, "GBP"),
+      missingMemberIds: [],
+    });
+  });
+
+  it("treats a real mismatch as an ARITHMETIC failure, not a note", () => {
+    // The dedupe removed a different amount from the one it counted, so movement is wrong.
+    const result = reconcile({
+      ...EMPTY,
+      batchPayments: [batchOf(30000, ["m-1"])],
+      payments: [memberOf("m-1", 10000)],
+    });
+    expect(result.tiesOut).toBe(false);
+    expect(result.discrepancies.join(" ")).toMatch(/movement is wrong by 20000/);
+  });
+
+  it("classifies a member outside the window as a WINDOW EDGE, not a defect", () => {
+    // This is the case a single combined bucket would mislabel every month.
+    const result = reconcile({
+      ...EMPTY,
+      batchPayments: [batchOf(30000, ["m-1", "m-outside"])],
+      payments: [memberOf("m-1", 10000)],
+    });
+    expect(result.batchMismatches).toEqual([]);
+    expect(result.batchesWithMembersOutsideWindow).toHaveLength(1);
+    expect(result.batchesWithMembersOutsideWindow[0]!.missingMemberIds).toEqual(["m-outside"]);
+    // Crucially NOT an arithmetic failure — the numbers are unverifiable, not wrong.
+    expect(result.tiesOut).toBe(true);
+  });
+
+  it("never puts the same batch in both buckets", () => {
+    const result = reconcile({
+      ...EMPTY,
+      batchPayments: [batchOf(30000, ["m-1", "m-outside"])],
+      payments: [memberOf("m-1", 99999)],
+    });
+    expect(result.batchMismatches).toHaveLength(0);
+    expect(result.batchesWithMembersOutsideWindow).toHaveLength(1);
+  });
+
+  it("skips a batch that names no members — unverifiable is not wrong", () => {
+    // ~5% of JENKI's batches carry no Payments[]; there is nothing to compare.
+    const result = reconcile({ ...EMPTY, batchPayments: [batchOf(30000, [])] });
+    expect(result.batchMismatches).toEqual([]);
+    expect(result.batchesWithMembersOutsideWindow).toEqual([]);
+    expect(result.tiesOut).toBe(true);
+  });
+
+  it("attributes a member that is listed by the batch but names no batch itself", () => {
+    // Either join direction may be the one Xero populated.
+    const silent = { ...memberOf("m-1", 30000), batchExternalId: null };
+    const result = reconcile({
+      ...EMPTY,
+      batchPayments: [batchOf(30000, ["m-1"])],
+      payments: [silent],
+    });
+    expect(result.batchMismatches).toEqual([]);
+    expect(result.batchesWithMembersOutsideWindow).toEqual([]);
+  });
+
+  it("ignores a CANCELLED batch, which was never counted", () => {
+    const dead = { ...batchOf(30000, ["m-1"]), amountIsLive: false, providerStatus: "DELETED" };
+    const result = reconcile({ ...EMPTY, batchPayments: [dead], payments: [memberOf("m-1", 1)] });
+    expect(result.batchMismatches).toEqual([]);
+    expect(result.batchesWithMembersOutsideWindow).toEqual([]);
+  });
+});
+
+describe("the double-count case, end to end", () => {
+  it("a batch, its member payments and its bank row equal ONE movement", () => {
+    // The three representations of the same money. Counted once, not three times.
+    const batch = payment({
+      externalId: "b-1",
+      source: "BATCH_PAYMENT",
+      providerType: "PAYBATCH",
+      paidAt: "2026-10-01",
+      amount: money(30000, "GBP"),
+      bankAmount: money(30000, "GBP"),
+      memberPaymentIds: ["m-1", "m-2"],
+    });
+    const members = [
+      payment({ externalId: "m-1", paidAt: "2026-10-01", amount: money(10000, "GBP"), bankAmount: money(10000, "GBP"), batchExternalId: "b-1" }),
+      payment({ externalId: "m-2", paidAt: "2026-10-01", amount: money(20000, "GBP"), bankAmount: money(20000, "GBP"), batchExternalId: "b-1" }),
+    ];
+    const overpayment = payment({
+      externalId: "op-1",
+      source: "OVERPAYMENT",
+      providerType: "SPEND-OVERPAYMENT",
+      paidAt: "2026-10-01",
+      amount: money(5000, "GBP"),
+      bankAmount: money(5000, "GBP"),
+      creditIsLive: true,
+      remainingCredit: money(5000, "GBP"),
+    });
+    const bankRowForOverpayment = bank({
+      externalId: "bt-op",
+      providerType: "SPEND-OVERPAYMENT",
+      overpaymentExternalId: "op-1",
+      total: money(5000, "GBP"),
+      bookedAt: "2026-10-01",
+    });
+    const transfer = bank({
+      externalId: "bt-t",
+      providerType: "SPEND-TRANSFER",
+      total: money(99999, "GBP"),
+      bookedAt: "2026-10-01",
+    });
+
+    const result = reconcile({
+      ...EMPTY,
+      batchPayments: [batch],
+      payments: members,
+      overpayments: [overpayment],
+      bankTransactions: [bankRowForOverpayment, transfer],
+    });
+
+    // 30,000 (batch, counted once) + 5,000 (overpayment) = 35,000. Not 30,000+30,000+5,000+5,000.
+    expect(result.movement.OUTFLOW).toEqual([money(35000, "GBP")]);
+    expect(result.batchMismatches).toEqual([]);
+    expect(result.tiesOut).toBe(true);
+    // And the transfer is excluded, visibly, rather than absorbed.
+    const excludedTransfer = result.excluded.find((l) => l.reason === "INTERNAL_TRANSFER");
+    expect(excludedTransfer!.byCurrency).toEqual([money(99999, "GBP")]);
+  });
+
+  it("credit notes never reach movement — reconcile does not accept them", () => {
+    // Guards the scope boundary: credit notes are built and deliberately unwired, so no
+    // future change should quietly start summing them into cash movement.
+    const input = { ...EMPTY, payments: [payment()] };
+    expect("creditNotes" in input).toBe(false);
+    const result = reconcile(input);
+    expect(result.counted.map((l) => l.source)).not.toContain("CREDIT_NOTE");
+    expect(result.movement.OUTFLOW).toEqual([money(10000, "GBP")]);
+  });
+});
