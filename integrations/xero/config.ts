@@ -70,6 +70,28 @@ export const XERO_SCOPES = [
 export const CHART_OF_ACCOUNTS_TTL_MS = 15 * 60 * 1000;
 
 /** Refresh a little before true expiry so an in-flight request cannot land on a dead token. */
+/**
+ * The organisation's timezone, for deciding which calendar day "today" is.
+ *
+ * TENANT CONFIG FOR NOW, from Xero's Organisation endpoint later. `GET /Organisation` returns
+ * `Timezone` (Xero's own enum, e.g. `GMTSTANDARDTIME`, not an IANA zone), so adopting it means
+ * a mapping table and a verified read — worth doing, and not worth guessing at inside this
+ * change. Until then the value is explicit and overridable rather than assumed.
+ *
+ * It is NOT a cosmetic setting. The reconciliation decides whether a record is dated in the
+ * future by comparing calendar days, and between midnight and 01:00 BST the UK day and the UTC
+ * day differ — so a wrong zone here reclassifies a whole day's trading as scheduled.
+ *
+ * Defaulting to Europe/London is a statement about the only tenant that exists, not a
+ * general assumption; `ORG_TIME_ZONE` overrides it, and the default moves the day it is wrong
+ * for somebody.
+ */
+export const DEFAULT_ORG_TIME_ZONE = "Europe/London";
+
+export function orgTimeZone(): string {
+  return process.env.ORG_TIME_ZONE?.trim() || DEFAULT_ORG_TIME_ZONE;
+}
+
 export const TOKEN_REFRESH_LEEWAY_MS = 60 * 1000;
 
 const EnvSchema = z.object({

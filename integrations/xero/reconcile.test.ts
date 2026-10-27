@@ -11,6 +11,10 @@ import type { NormalisedCommitment } from "../types";
  */
 
 const EMPTY: ReconciliationInput = {
+  // Far enough ahead that every fixture below is in the past, so the 51 existing assertions
+  // keep testing exactly what they tested before `asOf` existed. Scheduling is exercised by
+  // its own fixtures rather than by quietly changing the meaning of these.
+  asOf: "2099-12-31",
   payments: [],
   batchPayments: [],
   overpayments: [],
