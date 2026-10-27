@@ -298,6 +298,36 @@ Update this file after every meaningful implementation change.
   The render itself has no test — there is no DOM environment in devDependencies — so it is
   verified against production directly, which is the same standard applied to the scope deploy.
 
+- **A total with no currency of its own is a label waiting to be wrong** (2026-10-27) — the
+  batch-payments card needed per-currency subtotals, and `/BatchPayments` turned out to carry
+  no currency field at all: it is on `Account.CurrencyCode`, 22 of 22 live. The normaliser had
+  been stamping every batch with the org's base currency, which is indistinguishable from
+  correct while the two agree. JENKI holds Global Wallet bank accounts in CAD, AUD, JPY and
+  EUR, so they will not always agree. Found by surveying the payload before writing the
+  schema, which is the fourth time that order has caught something types could not.
+  The same card's integrity bucket compares a batch total to the sum of its members'
+  `BankAmount` rather than `Amount` — `Amount` is in the invoice's currency — and that
+  requirement was initially unpinned: a mutation swapping the basis passed every test, because
+  the test only covered the missing-field guard. The test that distinguishes them needs a
+  constructed currency rate, since the two are identical on all 722 live members.
+
+- **A render that cannot be tested is a render nobody has checked** (2026-10-27) — every
+  `/xero` card state had only ever been verified by loading production by hand, and the stated
+  reason was "no DOM environment". That was the wrong diagnosis: the obstacles were
+  `tsconfig`'s `jsx: "preserve"` (esbuild could not parse a `.tsx` test) and the unresolvable
+  `@/*` alias. A 25-line `vitest.config.ts` and splitting markup from fetching made the card a
+  pure function of a view model, testable with `renderToStaticMarkup` and no DOM at all. The
+  first run of those tests found a defect no model-level test could: a section with only
+  outgoing batches rendered "GBP in · 0 batch(es) — 0.00 GBP" next to the real figure, a zero
+  standing where there was no data. The lesson that generalises is that "we cannot test this"
+  deserves the same empirical check as any other claim about the system.
+- **A single total hid £100k that had not been paid** (2026-10-27) — the batch card's "out"
+  figure was 706,760.52 GBP until paid and scheduled batches were separated; 100,324.65 of it
+  was two batches dated in the future. The window is a `Date>=` predicate with no upper bound,
+  so a scheduled payment sits inside it looking exactly like a settled one. The fix is two
+  sections with two labels rather than one filter, because both facts are wanted — but the
+  label "already included in bank transactions" is only true of one of them.
+
 ## Session Notes
 
 - Build does not begin until commercial terms are signed (hard gate).

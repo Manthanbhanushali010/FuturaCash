@@ -144,6 +144,123 @@ Finish the Xero data foundation (core cash-flow endpoints) before building the f
   reported as a normalisation failure. `core/` is protected, so this needs a deliberate call.
 - The forecast engine itself — not started. Everything above is still data foundation.
 
+## BATCH PAYMENTS CARD — built 2026-10-27, `feature/batch-payments-card`, UNMERGED
+
+Branched from `origin/main` because **PR #1 is still OPEN** — its three commits (`6d93f7a`,
+`447647a`, `83489d2`) are not on main, so this branch needs a rebase after that merges. None
+of them are touched here.
+
+Standalone, and additional to nothing: `reconcile` does not import it, asserted by a
+source-level test in both directions, because wiring it in would double-count money that has
+already left the bank.
+
+**PAID AND SCHEDULED ARE SEPARATE SECTIONS WITH SEPARATE LABELS**, because the "already
+included in bank transactions" claim is true of one and false of the other. A paid batch is
+inside the bank-transaction read; a scheduled one is in no bank read at all. Live, 2026-10-27,
+30-day window — **22 batches, and the split matters**:
+
+| Section | Label | Records | Amount |
+|---|---|---:|---|
+| Paid | Already included in bank transactions. Not additional. | 7 in | 35,240.28 GBP |
+| Paid | " | 13 out | 606,435.87 GBP |
+| Scheduled | Scheduled, not yet paid. Not in bank transactions yet. | 2 out | 100,324.65 GBP |
+
+606,435.87 + 100,324.65 = 706,760.52, which is what a single undivided "out" figure showed
+before the split — **£100k of it had not been paid yet**. The two scheduled batches are dated
+2026-10-30 and 2026-11-02; the window has a lower bound only, so a scheduled batch falls
+inside it. Integrity bucket **0**, failures **0**.
+
+**THE TWO 200-MEMBER BATCHES ARE GENUINE — read individually, 2026-10-27.**
+`GET /BatchPayments/{id}` on `b05c0840` and `532dc2f4`: **200 members each, 200 distinct
+PaymentIDs, and the members sum to the batch total to the penny in both the list read and the
+single read.** So 200 is a real count here, not a per-batch cap. The visible flag stays
+anyway (`MEMBER_COUNT_TO_FLAG`), because a cap would look exactly like this AND would still
+tie — the integrity bucket cannot catch it, which is the whole reason the flag is separate.
+
+What the survey corrected before any code was written:
+- **A batch carries NO currency field.** It is `Account.CurrencyCode`, 22 of 22, nothing at the
+  top level. `normaliseBatchPayment` stamped every batch with the org base currency — right
+  until the day it is not. JENKI holds Global Wallet accounts in **CAD, AUD, JPY and EUR**, so
+  that day is foreseeable. Now read from the account; a batch with neither is a reported
+  failure rather than a guess.
+- Nested members carry `PaymentID`, `Amount` and `BankAmount` and nothing else — no status, no
+  type, no date. The member count therefore costs no second read.
+
+The bucket compares the batch total to the sum of members' **`BankAmount`, not `Amount`**:
+`Amount` is in the invoice's currency, `BankAmount` in the bank account's, and the total is
+quoted in the bank account's. Summing `Amount` would invent a mismatch under a currency rate.
+A member missing `BankAmount` is `UNCHECKABLE` rather than silently compared, and still lands
+in the bucket.
+
+Subtotals never cross a currency OR a direction. The second is unstated but worse: one "total
+batch payments" figure would net a supplier run against a customer receipt.
+
+**THE RENDER IS NOW UNDER TEST, for the first time on this project.** `vitest.config.ts` is
+new — `tsconfig`'s `jsx: "preserve"` meant esbuild could not parse a `.tsx` test, and the
+`@/*` alias was unresolvable under vitest, which is exactly why every `/xero` card state had
+only ever been checked by loading production by hand. Markup is now split from fetching
+(`app/xero/batch-payments-view.tsx` is a pure function of a discriminated-union view model),
+and 17 `renderToStaticMarkup` tests assert the HTML for truncated, failed, missing-scope,
+mismatch, scheduled and exactly-200 states. **"Never zeros" is asserted in the rendered
+markup**, not argued for in a comment.
+
+That test immediately found a real defect: a section holding only outgoing batches rendered
+**"GBP in · 0 batch(es) — 0.00 GBP"** beside the real figure — a zero standing where there is
+no data. Directions with no batches are now omitted. (And the first version of the assertion
+was wrong in the other direction: `toContain("0.00 GBP")` matches inside `"300.00 GBP"`, so it
+fired on a card with no zeros at all. Anchored to the element boundaries.)
+
+**THE NORMALISER CHANGE MOVED NO RECONCILIATION FIGURE.** Captured one live 30-day window
+(1,126 payments · 529 bank rows · 22 batches · 13 overpayments, all `truncated: false`) and
+reconciled it twice over the SAME captured records — once with `Account.CurrencyCode` and once
+with the old base-currency behaviour. The full serialised result is **identical byte for
+byte** (118 lines). Figures, for the record:
+
+| Counted | Records | Amount |
+|---|---:|---|
+| BANK_TRANSACTION | 118 | 951,289.00 GBP · 115.39 USD |
+| BATCH_PAYMENT | 22 | 742,000.80 GBP |
+| PAYMENT | 404 | 692,255.15 GBP |
+| OVERPAYMENT | 13 | 930.79 GBP |
+
+| Excluded | Records | Amount |
+|---|---:|---|
+| BANK · INTERNAL_TRANSFER | 398 | 1,025,082.12 GBP |
+| PAYMENT · BATCH_MEMBER | 722 | 742,000.80 GBP |
+| BANK · OVERPAYMENT_ALREADY_IN_BANK | 13 | 930.79 GBP |
+
+**IN 1,288,731.46 GBP / OUT 1,097,744.28 GBP + 115.39 USD → +190,987.18 GBP.** `tiesOut: true`,
+0 discrepancies, 0 warnings, 0 normalisation failures on any source. **The exact-penny ties
+hold again**: BATCH_PAYMENT counted 742,000.80 = PAYMENT·BATCH_MEMBER excluded 742,000.80 (22
+batches, 722 members — the same 722 the card counts), and OVERPAYMENT 930.79 =
+BANK·OVERPAYMENT_ALREADY_IN_BANK 930.79, 13 records each way. Commitments were deliberately
+excluded from this comparison: invoices are untouched by the change and identical in both runs.
+
+`maxDuration = 60` set explicitly on `/xero` (valid on either Vercel plan — still unconfirmed)
+and the card is behind `Suspense`. Measured live, median of three: **TTFB 9.97s → 10.19s, full
+response 10.01s → 12.37s.** The existing page is not slowed; the batch read arrives after the
+shell.
+
+Sixteen mutations verified to fail on the intended assertion. **One passed first and found a
+real gap:** swapping the member sum to `Amount` broke nothing, because the test covered the
+missing-`BankAmount` guard rather than the basis. Pinning it needs a constructed rate, since
+the two are identical on all 722 live members.
+
+### LOGGED, NOT BUILT (do not start without a decision)
+
+- **Per-currency minor-unit exponents in `core/money.ts` BEFORE accepting CAD, AUD or JPY.**
+  `minorUnitDigits` is the gate: **JPY has 0 decimal places**, not 2, so admitting it without
+  a per-currency exponent would multiply every yen figure by 100. The chart of accounts
+  already holds Global Wallet accounts in CAD, AUD, JPY and EUR, so the currencies exist —
+  they are simply not yet supported, and today a JPY batch becomes a reported failure, which
+  is the correct failure. `core/` is protected; this needs a deliberate call, like the CNY
+  question it extends.
+- **Stream the four Xero calls in `Body()` behind Suspense.** TTFB on `/xero` is ~10s either
+  way because `Body()` is an async server component that is NOT behind Suspense — the
+  snapshot's four calls block the shell. The batch card's Suspense boundary only defers the
+  fifth. Fixing this is the actual page-speed work; the card merely avoided adding to it.
+- **Survey helpers should refuse a page-1-only sample** — see the standing rule below.
+
 ## PAYMENT FAMILY SURVEY — live, 2026-10-22 (read this before building the four)
 
 Record counts: **Payments 24,520 · BatchPayments 1,421 · Overpayments 534 · Prepayments 0.**

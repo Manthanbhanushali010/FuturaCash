@@ -219,6 +219,16 @@ const XeroAccountRef = z
     AccountID: z.string().optional(),
     Code: z.string().optional(),
     Name: z.string().optional(),
+    /**
+     * The bank account's currency, and the only currency a batch total is quoted in.
+     *
+     * Surveyed live 2026-10-27: present on 22 of 22 batch payments in the last 30 days, and
+     * there is NO currency field on the batch itself. Without this, a batch could only be
+     * stamped with the org's base currency — which is right until the day it is not, and then
+     * labels foreign money as sterling with nothing erroring. Six of JENKI's eight purchase
+     * orders are already USD, so that day is foreseeable.
+     */
+    CurrencyCode: z.string().optional(),
   })
   .passthrough();
 
@@ -275,6 +285,8 @@ export const XeroBatchPayment = z
     Type: z.string().optional(),
     Status: z.string().optional(),
     Date: XeroDate.optional(),
+    /** The plain twin of `Date`; `parseXeroDate` prefers it. Live on 22 of 22. */
+    DateString: z.string().optional(),
     Reference: z.string().optional(),
     Particulars: z.string().optional(),
     Narrative: z.string().optional(),
