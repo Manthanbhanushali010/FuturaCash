@@ -220,6 +220,41 @@ describe("BatchPayment total — TotalAmount, not Amount", () => {
   });
 });
 
+describe("BatchPayment currency — the bank account's, not the org's base", () => {
+  // A batch carries no currency field of its own. Surveyed live 2026-10-27:
+  // `Account.CurrencyCode` on 22 of 22 batches, nothing at the top level. Before this the
+  // normaliser stamped every batch with the org base currency, which is indistinguishable
+  // from correct while the two agree — and JENKI already holds Global Wallet bank accounts
+  // in CAD, AUD, JPY and EUR, so they will not always agree.
+  it("takes the currency from the batch's bank account", () => {
+    const usd = {
+      ...LIVE_BATCH,
+      Account: { AccountID: "a1", CurrencyCode: "USD" },
+    } as XeroBatchPayment;
+
+    expect(normaliseBatchPayment(usd, options).amount).toEqual({
+      minor: 62300,
+      currency: "USD",
+    });
+  });
+
+  it("falls back to the org base currency only when the account omits one", () => {
+    const noCurrency = { ...LIVE_BATCH, Account: { AccountID: "a1" } } as XeroBatchPayment;
+
+    expect(normaliseBatchPayment(noCurrency, options).amount.currency).toBe("GBP");
+  });
+
+  it("prefers DateString over the .NET Date, as parseXeroDate does elsewhere", () => {
+    const dated = {
+      ...LIVE_BATCH,
+      Date: "/Date(1792972800000+0000)/",
+      DateString: "2026-10-25T00:00:00",
+    } as XeroBatchPayment;
+
+    expect(normaliseBatchPayment(dated, options).paidAt).toBe("2026-10-25T00:00:00.000Z");
+  });
+});
+
 describe("BankAmount — what actually hit the bank", () => {
   it("carries BankAmount alongside Amount", () => {
     const out = normalisePayment(LIVE_PAYMENT, options);

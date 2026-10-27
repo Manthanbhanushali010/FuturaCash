@@ -75,7 +75,7 @@ function toStatus(status: string): CommitmentStatus {
  * Totals and outstanding amounts are 2dp in Xero, so extra precision here means our
  * assumption is wrong and we stop (`rounding: "forbid"`) rather than quietly rounding.
  */
-function toMoney(value: number | undefined, currency: CurrencyCode, field: string): Money {
+export function toMoney(value: number | undefined, currency: CurrencyCode, field: string): Money {
   if (value === undefined) return money(0, currency);
   try {
     return money(decimalToMinorUnits(value, minorUnitDigits(currency)), currency);
@@ -319,7 +319,14 @@ export function normaliseBatchPayment(
   batch: XeroBatchPayment,
   options: NormalisePaymentOptions,
 ): NormalisedProviderPayment {
-  const currency = options.fallbackCurrency;
+  // The bank account's currency, which is the currency the batch total is quoted in. A batch
+  // carries no currency field of its own — surveyed live 2026-10-27, `Account.CurrencyCode`
+  // on 22 of 22 and nothing at the top level. Previously every batch was stamped with the
+  // org's base currency, which is indistinguishable from correct while the two agree and
+  // silently mislabels foreign money the moment they do not.
+  const currency = batch.Account?.CurrencyCode
+    ? parseCurrency(batch.Account.CurrencyCode)
+    : options.fallbackCurrency;
   return {
     externalId: batch.BatchPaymentID,
     provider: "XERO",
@@ -340,7 +347,7 @@ export function normaliseBatchPayment(
     documentExternalId: null,
     accountExternalId: batch.Account?.AccountID ?? null,
     accountCode: batch.Account?.Code ?? null,
-    paidAt: parseXeroDate(batch.Date, undefined),
+    paidAt: parseXeroDate(batch.Date, batch.DateString),
     currency,
     // TotalAmount, NOT Amount. 5e35cd7 read `Amount` from documentation; live batches do not
     // have it, and toMoney(undefined) returns zero rather than throwing — so all 1,421 of

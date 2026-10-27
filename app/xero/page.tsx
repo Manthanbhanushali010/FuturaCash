@@ -1,3 +1,4 @@
+import { Suspense } from "react";
 import type { Money } from "@/core/money";
 import { outstandingByDirection } from "@/core/position";
 import {
@@ -9,6 +10,7 @@ import {
   type XeroSnapshot,
 } from "@/integrations/xero";
 import { XeroApiError } from "@/integrations/xero/client";
+import { BatchPaymentsCard, BatchPaymentsCardSkeleton } from "./batch-payments";
 import { Card, Cell, Empty, Figure, Notice, Pill, Row, Table, formatDay } from "./parts";
 
 /**
@@ -19,6 +21,20 @@ import { Card, Cell, Empty, Figure, Notice, Pill, Row, Table, formatDay } from "
  */
 
 export const dynamic = "force-dynamic";
+
+/**
+ * Explicit, rather than inherited from whatever the platform's default happens to be.
+ *
+ * The default is 10s on Hobby and 15s on Pro — below what this page already needs: the
+ * snapshot alone makes four Xero calls, and the batch-payment card adds a fifth. A page that
+ * is killed mid-read shows the user a platform error page, not a bounded answer, which is the
+ * worst of the available outcomes. 60s is the Hobby ceiling and well inside Pro's 300s, so
+ * this value is valid on either plan — deliberately, since the plan is not confirmed.
+ *
+ * It is a ceiling, not a budget: the batch card is behind Suspense, so the rest of the page
+ * is already on screen while that read runs.
+ */
+export const maxDuration = 60;
 
 /**
  * Rows rendered per table.
@@ -362,6 +378,17 @@ function Snapshot({ snapshot }: { snapshot: XeroSnapshot }) {
           ) : null}
         </Card>
       )}
+
+      {/* Behind Suspense so the snapshot above is not held back by a fifth Xero call. The
+          card reads /BatchPayments itself and renders its own failure states — it must never
+          be able to blank or slow the cards that were already working. */}
+      <Suspense fallback={<BatchPaymentsCardSkeleton />}>
+        <BatchPaymentsCard
+          tenantId={snapshot.tenantId}
+          baseCurrency={organisation?.baseCurrency ?? null}
+          scopeMissing={snapshot.missingScopes.includes("accounting.payments.read")}
+        />
+      </Suspense>
 
       <Card title="Chart of accounts" subtitle="Cached for 15 minutes — Xero allows 5,000 calls/day per org.">
         {accounts.items.length === 0 ? (
