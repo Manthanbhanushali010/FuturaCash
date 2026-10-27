@@ -611,6 +611,61 @@ Dedupe keys in use: `batchExternalId`/`memberPaymentIds` (payments↔batches, bo
 primary keys differ), `providerType.endsWith("-TRANSFER")` (transfers), and
 `amountIsLive`/`creditIsLive` for cancelled records.
 
+## BACKLOG — approved to RECORD, not to build (each its own tiny branch)
+
+Nothing here is started without an explicit go-ahead. See also the per-feature
+"LOGGED, NOT BUILT" list under the batch-payments card.
+
+### 1. Make `db:migrate` fail loudly
+
+`package.json:13` is still `"db:migrate": "prisma migrate dev"`, and `.env`'s `DATABASE_URL`
+points at **production**. `migrate dev` is not a read: it diffs, can prompt to reset, and
+creates a shadow database. One absent-minded `npm run db:migrate` is the single cheapest way
+to lose JENKI's data, and the only thing standing between that and the database today is
+remembering not to type it.
+
+**Verified harmless as it stands** (2026-10-27): nothing invokes it. `postinstall` runs
+`prisma generate` only, `build` is `next build`, there is no `vercel.json`, the Vercel project
+reports an unoverridden `npm run build`, and CI runs typecheck/lint/test/eval/build with no
+database and no env. So this is a latent footgun, not a live one.
+
+Proposed change — one line, no code paths touched, CI unaffected:
+
+```json
+"db:migrate": "echo 'REFUSED: prisma migrate dev must never run against production. Use migrate deploy against a non-production endpoint.' >&2 && exit 1"
+```
+
+Shape: own branch, one-line diff plus a note here. It cannot regress anything, because the
+script has no current caller. Reinstate a working `db:migrate` only once a non-production
+endpoint exists, pointed at that endpoint explicitly.
+
+### 2. Align the Node version across local, CI and Vercel
+
+Three versions, none of them pinned by the repo:
+
+| Where | Version | Source |
+|---|---|---|
+| Vercel (production) | **24.x** | project setting, read via `vercel project inspect` |
+| CI | **20** | `.github/workflows/ci.yml`, `actions/setup-node` |
+| Local | **20.11.1** | whatever is installed |
+
+`package.json` has no `engines` field and there is no `.nvmrc`, so nothing enforces agreement
+and the drift is invisible until something breaks. **Production runs a major version that CI
+has never executed** — the gate proves the build works on 20 and then ships it on 24. Node 24
+removes and changes APIs relative to 20, so a failure of that kind surfaces for the first time
+in front of a customer, which is exactly the class of defect the merge gate exists to catch.
+
+Not a pure repo change: **Vercel's Node version is a dashboard setting**, so whichever version
+is chosen, that one has to be set there too and the project redeployed.
+
+**The decision is which version**, and it is not mine:
+- **Node 22.x** — current LTS, the conservative choice; means changing Vercel down from 24.
+- **Node 24.x** — matches production today; means moving CI and local up, and accepting a
+  newer runtime than LTS.
+
+Then: `"engines": { "node": "<chosen>" }` in `package.json`, the same in `setup-node`, an
+`.nvmrc` for local, and the Vercel setting to match. Own branch, config only.
+
 ## Known gate (confirmed Oct 2026 — don't re-litigate)
 
 Xero's `/Journals` endpoint now requires the Advanced pricing tier (~$1,445 AUD/month) plus a
