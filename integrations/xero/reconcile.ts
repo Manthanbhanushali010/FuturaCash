@@ -80,6 +80,25 @@ export interface PeriodMovement {
   count: number;
 }
 
+/**
+ * A batch whose total does not equal the sum of its member payments.
+ *
+ * TWO CAUSES, and conflating them would be the bug. A batch dated inside the window whose
+ * members fall OUTSIDE it is a window artefact — the arithmetic is fine, we simply cannot see
+ * all the parts. A batch whose members are all present and still disagree is a genuine data
+ * integrity problem. Only the second should ever be non-empty, and reporting them in one
+ * bucket would make a window edge look like a defect every month.
+ */
+export interface BatchMismatch {
+  batchExternalId: string;
+  /** The batch's own total. */
+  batchAmount: Money;
+  /** Sum of the member payments that were found in this read. */
+  memberAmount: Money;
+  /** Member ids the batch names that were not present. Non-empty means window artefact. */
+  missingMemberIds: string[];
+}
+
 export interface Reconciliation {
   /** Cash that moved, per direction, grouped by currency. */
   movement: Record<CommitmentDirection, Money[]>;
@@ -107,6 +126,20 @@ export interface Reconciliation {
    * including `unattributed`, which holds counted records falling outside every period rather
    * than letting them disappear from the breakdown.
    */
+  /**
+   * Batches whose members are all present and still do not sum to the batch total.
+   *
+   * MUST BE EMPTY. A non-empty list means the dedupe removed an amount different from the one
+   * it counted, so the movement figure is wrong by the difference.
+   */
+  batchMismatches: BatchMismatch[];
+  /**
+   * Batches whose members are not all inside the read. NOT a defect — a window edge.
+   *
+   * Reported separately so that a batch straddling the boundary is never mistaken for a data
+   * integrity failure, which is what a single combined bucket would do every month.
+   */
+  batchesWithMembersOutsideWindow: BatchMismatch[];
   byPeriod: PeriodMovement[];
   /** Counted records that fell in no supplied period. Null when every one was attributed. */
   unattributed: PeriodMovement | null;
@@ -288,6 +321,15 @@ export function reconcile(input: ReconciliationInput): Reconciliation {
   // Counted FIRST, because which payments are duplicates depends on which batches survived.
   const countedBatchIds = new Set<string>();
   const batchMemberIds = new Set<string>();
+  /** batchId -> the batch, so its total can be checked against its members afterwards. */
+  const countedBatches = new Map<string, { amount: Money; memberIds: string[] }>();
+  /** memberPaymentId -> batchId, so a member can be attributed even without batchExternalId. */
+  const memberToBatch = new Map<string, string>();
+  /** batchId -> summed amounts of the member payments actually seen in this read. */
+  const memberTotals = new Map<string, CurrencyBucket>();
+  /** batchId -> member ids actually seen. */
+  const membersSeen = new Map<string, Set<string>>();
+
   for (const batch of input.batchPayments) {
     bucketFor(presented, "BATCH_PAYMENT").addMoney(batch.amount);
     if (!batch.amountIsLive) {
@@ -295,7 +337,14 @@ export function reconcile(input: ReconciliationInput): Reconciliation {
       continue;
     }
     countedBatchIds.add(batch.externalId);
-    for (const id of batch.memberPaymentIds) batchMemberIds.add(id);
+    for (const id of batch.memberPaymentIds) {
+      batchMemberIds.add(id);
+      memberToBatch.set(id, batch.externalId);
+    }
+    countedBatches.set(batch.externalId, {
+      amount: batch.amount,
+      memberIds: batch.memberPaymentIds,
+    });
     count("BATCH_PAYMENT", batch.amount, batch.direction, batch.paidAt);
   }
 
@@ -317,6 +366,17 @@ export function reconcile(input: ReconciliationInput): Reconciliation {
     const listedByBatch = batchMemberIds.has(payment.externalId);
     if (namesCountedBatch || listedByBatch) {
       exclude("PAYMENT", "BATCH_MEMBER", amount);
+      // Attribute the excluded member so the batch's total can be checked against the parts
+      // that were actually removed. Either join direction can be the one Xero populated.
+      const batchId = payment.batchExternalId ?? memberToBatch.get(payment.externalId);
+      if (batchId !== undefined) {
+        const bucket = memberTotals.get(batchId) ?? new CurrencyBucket();
+        bucket.addMoney(amount);
+        memberTotals.set(batchId, bucket);
+        const seen = membersSeen.get(batchId) ?? new Set<string>();
+        seen.add(payment.externalId);
+        membersSeen.set(batchId, seen);
+      }
       continue;
     }
 
@@ -381,6 +441,53 @@ export function reconcile(input: ReconciliationInput): Reconciliation {
     }
 
     count("BANK_TRANSACTION", transaction.total, transaction.direction, transaction.bookedAt);
+  }
+
+  // --- requirement 6: does each batch equal the members we removed for it? ----
+  // Split deliberately. A batch whose members are not all in the read is a WINDOW EDGE, not a
+  // defect; a batch whose members are all present and still disagree means the dedupe removed
+  // a different amount from the one it counted, so `movement` is wrong by the difference.
+  const batchMismatches: BatchMismatch[] = [];
+  const batchesWithMembersOutsideWindow: BatchMismatch[] = [];
+
+  for (const [batchExternalId, batch] of countedBatches) {
+    // A batch naming no members cannot be checked either way. Skipped rather than reported,
+    // because "unverifiable" is not the same as "wrong" and 5% of JENKI's batches are this.
+    if (batch.memberIds.length === 0) continue;
+
+    const seen = membersSeen.get(batchExternalId) ?? new Set<string>();
+    const missingMemberIds = batch.memberIds.filter((id) => !seen.has(id));
+    const bucket = memberTotals.get(batchExternalId) ?? new CurrencyBucket();
+    const memberMinor = bucket.minorFor(batch.amount.currency);
+    const memberAmount = money(memberMinor, batch.amount.currency);
+
+    if (missingMemberIds.length > 0) {
+      batchesWithMembersOutsideWindow.push({
+        batchExternalId,
+        batchAmount: batch.amount,
+        memberAmount,
+        missingMemberIds,
+      });
+      continue;
+    }
+    if (memberMinor !== batch.amount.minor) {
+      batchMismatches.push({
+        batchExternalId,
+        batchAmount: batch.amount,
+        memberAmount,
+        missingMemberIds: [],
+      });
+    }
+  }
+
+  // A real mismatch means the counted and removed amounts differ, so the movement figure is
+  // wrong. That is an arithmetic failure, not a note.
+  for (const mismatch of batchMismatches) {
+    discrepancies.push(
+      `Batch ${mismatch.batchExternalId}: total ${mismatch.batchAmount.minor} minor units but ` +
+        `its member payments sum to ${mismatch.memberAmount.minor} — every member was present, ` +
+        `so movement is wrong by ${mismatch.batchAmount.minor - mismatch.memberAmount.minor}.`,
+    );
   }
 
   // --- commitments, reported but never added to movement -------------------
@@ -453,6 +560,8 @@ export function reconcile(input: ReconciliationInput): Reconciliation {
       .sort((a, b) => `${a.source}${a.reason}`.localeCompare(`${b.source}${b.reason}`)),
     committed: { INFLOW: committed.INFLOW.byCurrency, OUTFLOW: committed.OUTFLOW.byCurrency },
     availableCredit: credit.byCurrency,
+    batchMismatches,
+    batchesWithMembersOutsideWindow,
     byPeriod: periodBuckets.map(({ period, buckets, count: n }) => ({
       label: period.label,
       movement: { INFLOW: buckets.INFLOW.byCurrency, OUTFLOW: buckets.OUTFLOW.byCurrency },

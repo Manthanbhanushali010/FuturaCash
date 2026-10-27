@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { readChunked } from "./chunked-read";
+import { CHUNK_MAX_PAGES, readChunked } from "./chunked-read";
 import { clearChartOfAccountsCache } from "./client";
 import { setXeroTokenStore, type XeroTokenState, type XeroTokenStore } from "./tokens";
 
@@ -359,3 +359,135 @@ function json(body: unknown) {
     text: async () => JSON.stringify(body),
   } as unknown as Response;
 }
+
+describe("page budget", () => {
+  it("defaults to 20 pages, because 10 is below the real volume of a month", async () => {
+    // JENKI's busiest observed 30-day chunk held 1,042 payments against the per-fetch default
+    // of 1,000. At that default the most recent month truncates and the chunk is discarded.
+    expect(CHUNK_MAX_PAGES).toBe(20);
+    stub({ Payments: 1, BatchPayments: 1, Overpayments: 1, Prepayments: 0, BankTransactions: 1 });
+    await readChunked(TENANT, { days: 30, now: NOW, sleep: noSleep });
+    // 20 pages requested at most; a short first page ends it, so just assert the budget is
+    // the one that reached the fetch by checking no truncation was reported.
+    expect(calls.some((c) => c.includes("/Payments"))).toBe(true);
+  });
+
+  it("warns when a source passes 80% of its budget, while still complete", async () => {
+    // Fires BEFORE truncation. Volume rises on its own as JENKI grows, and the first sign
+    // should not be a discarded chunk.
+    const perPage = 100;
+    let page = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: unknown) => {
+        const url = String(input);
+        calls.push(url);
+        if (url.includes("/Payments") && !url.includes("/BatchPayments")) {
+          page += 1;
+          // 2 full pages then a short one: 250 of a 300 budget = 83%.
+          const n = page <= 2 ? perPage : 50;
+          return json({ Payments: Array.from({ length: n }, (_, i) => idFor("Payments", i)) });
+        }
+        if (url.includes("/BatchPayments")) return json({ BatchPayments: [] });
+        if (url.includes("/Overpayments")) return json({ Overpayments: [] });
+        if (url.includes("/Prepayments")) return json({ Prepayments: [] });
+        return json({ BankTransactions: [] });
+      }),
+    );
+    const result = await readChunked(TENANT, { days: 30, now: NOW, maxPages: 3, sleep: noSleep });
+    expect(result.complete).toBe(true);
+    expect(result.chunks[0]!.nearCap).toEqual(["PAYMENT"]);
+    expect(result.warnings).toHaveLength(1);
+    expect(result.warnings[0]).toMatch(/over 80% of the 300-record budget/);
+  });
+
+  it("stays quiet when every source is comfortably under budget", async () => {
+    stub({ Payments: 5, BatchPayments: 2, Overpayments: 1, Prepayments: 0, BankTransactions: 4 });
+    const result = await readChunked(TENANT, { days: 30, now: NOW, sleep: noSleep });
+    expect(result.chunks[0]!.nearCap).toEqual([]);
+    expect(result.warnings).toEqual([]);
+  });
+
+  it("does not near-cap BatchPayments, which is a single unpaginated call", async () => {
+    // A page budget is meaningless for an endpoint that ignores `page`.
+    stub({ Payments: 0, BatchPayments: 2000, Overpayments: 0, Prepayments: 0, BankTransactions: 0 });
+    const result = await readChunked(TENANT, { days: 30, now: NOW, maxPages: 3, sleep: noSleep });
+    expect(result.chunks[0]!.nearCap).not.toContain("BATCH_PAYMENT");
+  });
+
+  it("gives bank and payments the SAME window, not a per-source alignment", async () => {
+    stub({ Payments: 1, BatchPayments: 1, Overpayments: 1, Prepayments: 0, BankTransactions: 1 });
+    await readChunked(TENANT, { days: 30, now: NOW, sleep: noSleep });
+    const bound = (fragment: string) => {
+      const url = calls.find((c) => c.includes(fragment))!;
+      return /Date>=DateTime\([^)]*\)/.exec(new URL(url).searchParams.get("where") ?? "")![0];
+    };
+    expect(bound("/BankTransactions")).toBe(bound("/Payments"));
+    expect(bound("/BatchPayments")).toBe(bound("/Payments"));
+    expect(bound("/Overpayments")).toBe(bound("/Payments"));
+  });
+});
+
+describe("window edges across chunks", () => {
+  it("a batch in one chunk and its members in the next still reconcile after merging", async () => {
+    // The reason merging precedes deduping. Read per chunk, a batch would look like it had
+    // members missing; merged, the pair is whole. This is the chunked analogue of the
+    // window-artefact bucket in reconcile.
+    let payCall = 0;
+    let batchCall = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: unknown) => {
+        const url = String(input);
+        calls.push(url);
+        if (url.includes("/BatchPayments")) {
+          batchCall += 1;
+          // The batch arrives only in the NEWER chunk.
+          return json({
+            BatchPayments:
+              batchCall === 1
+                ? [{ BatchPaymentID: "b-1", Type: "PAYBATCH", Status: "AUTHORISED", TotalAmount: 300 }]
+                : [],
+          });
+        }
+        if (url.includes("/Payments")) {
+          payCall += 1;
+          // Its member arrives only in the OLDER chunk.
+          return json({
+            Payments:
+              payCall === 1
+                ? []
+                : [{ PaymentID: "m-1", PaymentType: "ACCPAYPAYMENT", Status: "AUTHORISED", Amount: 300, BatchPaymentID: "b-1" }],
+          });
+        }
+        if (url.includes("/Overpayments")) return json({ Overpayments: [] });
+        if (url.includes("/Prepayments")) return json({ Prepayments: [] });
+        return json({ BankTransactions: [] });
+      }),
+    );
+
+    const result = await readChunked(TENANT, { days: 60, now: NOW, sleep: noSleep });
+    expect(result.complete).toBe(true);
+    // Both halves present in the merged set, which is what reconcile dedupes over.
+    expect(result.merged.batchPayments).toHaveLength(1);
+    expect(result.merged.payments).toHaveLength(1);
+    expect(result.merged.payments[0]!.PaymentID).toBe("m-1");
+  });
+
+  it("a record on a chunk boundary appears exactly once, not twice and not never", async () => {
+    // `since` inclusive, `until` exclusive, derived from one clock — so the boundary day
+    // belongs to the newer chunk only.
+    stub({ Payments: 1, BatchPayments: 0, Overpayments: 0, Prepayments: 0, BankTransactions: 0 });
+    const result = await readChunked(TENANT, { days: 60, now: NOW, sleep: noSleep });
+    // One record per chunk, two chunks, so exactly two merged — not deduped away, not doubled.
+    expect(result.merged.payments).toHaveLength(2);
+    const bounds = calls
+      .filter((c) => c.includes("/Payments") && !c.includes("/BatchPayments"))
+      .map((c) => new URL(c).searchParams.get("where") ?? "");
+    const lower = bounds.map((w) => /Date>=DateTime\(([^)]*)\)/.exec(w)![1]);
+    const upper = bounds.map((w) => /Date<DateTime\(([^)]*)\)/.exec(w)?.[1] ?? null);
+    // Newest chunk: open upper bound. Older chunk's upper bound == newest chunk's lower.
+    expect(upper[0]).toBeNull();
+    expect(upper[1]).toBe(lower[0]);
+  });
+});

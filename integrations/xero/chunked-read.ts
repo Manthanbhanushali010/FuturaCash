@@ -42,6 +42,31 @@ export interface ChunkRecords {
   bankTransactions: XeroBankTransaction[];
 }
 
+/**
+ * Page budget for a 30-day chunk, and the number is measured.
+ *
+ * JENKI runs ~32.6 payments/day, so a 30-day chunk holds ~980 — and the busiest observed
+ * chunk held **1,042**. The shipped per-fetch default of 10 pages (1,000 records) is therefore
+ * BELOW the real volume of the most recent month: at the default, payments truncate and the
+ * chunk is discarded, so the page shows nothing rather than something wrong. Loud, but broken.
+ *
+ * 20 gives ~2x headroom on the worst month seen. Bank transactions are not the constraint —
+ * 19.1/day, busiest chunk 799 — but they share the budget so the margin is theirs too.
+ */
+export const CHUNK_MAX_PAGES = 20;
+
+/** Rows per Xero page. The cap is `CHUNK_MAX_PAGES * PAGE_SIZE`. */
+const PAGE_SIZE = 100;
+
+/**
+ * Warn once a source passes this share of its page budget.
+ *
+ * Truncation is already a hard failure, but it fails AFTER the fact. This fires while there is
+ * still headroom, because the volume that decides it is JENKI's trading rate — it rises on its
+ * own, and the first sign should not be a discarded chunk.
+ */
+const NEAR_CAP_RATIO = 0.8;
+
 export interface ChunkOutcome {
   window: DateWindow;
   /** False means at least one source hit its page bound; the records were discarded. */
@@ -51,6 +76,11 @@ export interface ChunkOutcome {
   counts: Record<keyof ChunkRecords, number>;
   /** How many times a 429 forced this chunk to be retried. */
   retries: number;
+  /**
+   * Sources that came back above 80% of their page budget. Not a failure — a warning that
+   * this window is approaching the point where it will be discarded.
+   */
+  nearCap: string[];
 }
 
 export interface ChunkedReadResult {
@@ -68,6 +98,8 @@ export interface ChunkedReadResult {
   stoppedAt: { window: DateWindow; truncatedSources: string[] } | null;
   /** True only when the whole requested span was read completely. */
   complete: boolean;
+  /** Human-readable near-cap warnings across all chunks. Empty is the healthy state. */
+  warnings: string[];
 }
 
 export interface ChunkedReadOptions {
@@ -78,6 +110,7 @@ export interface ChunkedReadOptions {
    * comment. Exposed for tests, not for tuning.
    */
   chunkDays?: number;
+  /** Page budget per source per chunk. Defaults to CHUNK_MAX_PAGES — see its note. */
   now?: Date;
   maxPages?: number;
   /**
@@ -108,6 +141,20 @@ function emptyRecords(): ChunkRecords {
   };
 }
 
+/** Maps a reconciliation source name back to its key in `ChunkRecords`. */
+function countKey(source: string): keyof ChunkRecords {
+  switch (source) {
+    case "PAYMENT":
+      return "payments";
+    case "OVERPAYMENT":
+      return "overpayments";
+    case "PREPAYMENT":
+      return "prepayments";
+    default:
+      return "bankTransactions";
+  }
+}
+
 export async function readChunked(
   tenantId: string,
   options: ChunkedReadOptions,
@@ -117,6 +164,7 @@ export async function readChunked(
   const spacingMs = options.spacingMs ?? 1_100;
   const chunkSpacingMs = options.chunkSpacingMs ?? 15_000;
   const maxRetries = options.maxRetries ?? 3;
+  const maxPages = options.maxPages ?? CHUNK_MAX_PAGES;
   const sleep = options.sleep ?? defaultSleep;
   const day = 86_400_000;
 
@@ -125,6 +173,7 @@ export async function readChunked(
   const merged = emptyRecords();
   let completeDays = 0;
   let stoppedAt: ChunkedReadResult["stoppedAt"] = null;
+  const warnings: string[] = [];
 
   for (let index = 0; index < chunkCount; index += 1) {
     // Newest chunk first, so a failure further back still leaves the most recent span usable.
@@ -138,12 +187,20 @@ export async function readChunked(
     if (index > 0) await sleep(chunkSpacingMs);
 
     const outcome = await readOneChunk(tenantId, window, {
-      maxPages: options.maxPages,
+      maxPages,
       spacingMs,
       maxRetries,
       sleep,
     });
     chunks.push(outcome.outcome);
+    for (const source of outcome.outcome.nearCap) {
+      warnings.push(
+        `${source}: ${outcome.outcome.counts[countKey(source)]} records in the chunk from ` +
+          `${window.since.toISOString().slice(0, 10)} — over ${Math.round(NEAR_CAP_RATIO * 100)}% of the ` +
+          `${maxPages * PAGE_SIZE}-record budget. Still complete, but this window is approaching the ` +
+          `point where it will be discarded.`,
+      );
+    }
 
     if (!outcome.outcome.complete) {
       // Hard failure: discard this chunk's records and stop reaching further back. Mixing a
@@ -177,6 +234,7 @@ export async function readChunked(
     completeDays,
     stoppedAt,
     complete: stoppedAt === null && completeDays >= options.days,
+    warnings,
   };
 }
 
@@ -184,7 +242,7 @@ async function readOneChunk(
   tenantId: string,
   window: DateWindow,
   options: {
-    maxPages?: number;
+    maxPages: number;
     spacingMs: number;
     maxRetries: number;
     sleep: (ms: number) => Promise<void>;
@@ -195,7 +253,7 @@ async function readOneChunk(
 
   for (;;) {
     try {
-      const fetchOptions = maxPages === undefined ? { window } : { window, maxPages };
+      const fetchOptions = { window, maxPages };
       const payments = await fetchPayments(tenantId, fetchOptions);
       await sleep(spacingMs);
       const batchPayments = await fetchBatchPayments(tenantId, { window });
@@ -214,6 +272,7 @@ async function readOneChunk(
         bankTransactions.truncated ? "BANK_TRANSACTION" : null,
       ].filter((source): source is string => source !== null);
 
+      const cap = maxPages * PAGE_SIZE;
       const records: ChunkRecords = {
         payments: payments.items,
         batchPayments: batchPayments.items,
@@ -222,10 +281,24 @@ async function readOneChunk(
         bankTransactions: bankTransactions.transactions,
       };
 
+      // Near-cap is computed only for the sources that actually paginate. /BatchPayments is
+      // a single unpaginated call, so a page budget means nothing there.
+      const nearCap = (
+        [
+          ["PAYMENT", records.payments.length],
+          ["OVERPAYMENT", records.overpayments.length],
+          ["PREPAYMENT", records.prepayments.length],
+          ["BANK_TRANSACTION", records.bankTransactions.length],
+        ] as const
+      )
+        .filter(([, count]) => count >= cap * NEAR_CAP_RATIO)
+        .map(([source]) => source as string);
+
       return {
         outcome: {
           window,
           complete: truncatedSources.length === 0,
+          nearCap,
           truncatedSources,
           counts: {
             payments: records.payments.length,
