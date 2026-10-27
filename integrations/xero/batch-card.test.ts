@@ -186,9 +186,11 @@ describe("buildBatchPaymentCard — the card contributes to no cash figure", () 
     // top level — the shape that could be mistaken for cash movement — fails here.
     expect(Object.keys(card).sort()).toEqual([
       "failures",
-      "futureDated",
       "integrityBucket",
+      "memberCountFlagged",
       "rows",
+      "scheduled",
+      "scheduledSubtotals",
       "subtotals",
     ]);
     for (const subtotal of card.subtotals) {
@@ -223,18 +225,75 @@ describe("buildBatchPaymentCard — the card contributes to no cash figure", () 
 });
 
 describe("buildBatchPaymentCard — bounds and gaps are stated", () => {
-  it("counts future-dated batches instead of hiding them", () => {
+  it("separates a scheduled batch from the paid ones and keeps it out of their subtotals", () => {
+    // A paid batch is already inside the bank-transaction read; a scheduled one is in no
+    // bank read at all. One list could only carry a label that is wrong about one of them.
     const card = buildBatchPaymentCard(
       [
-        batch({ BatchPaymentID: "past", DateString: "2026-10-20T00:00:00" }),
-        batch({ BatchPaymentID: "future", DateString: "2026-11-02T00:00:00" }),
+        batch({ BatchPaymentID: "past", DateString: "2026-10-20T00:00:00", TotalAmount: 300 }),
+        batch({
+          BatchPaymentID: "future",
+          DateString: "2026-11-02T00:00:00",
+          TotalAmount: 1000,
+          Payments: [{ PaymentID: "s-1", Amount: 1000, BankAmount: 1000 }],
+        }),
       ],
       { ...GBP, now: new Date("2026-10-27T12:00:00Z") },
     );
 
-    expect(card.futureDated).toBe(1);
-    // Still listed and still subtotalled — counted, not filtered.
-    expect(card.rows).toHaveLength(2);
+    expect(card.rows.map((row) => row.externalId)).toEqual(["past"]);
+    expect(card.scheduled.map((row) => row.externalId)).toEqual(["future"]);
+    expect(card.subtotals[0]?.outflow.minor).toBe(30_000);
+    expect(card.scheduledSubtotals[0]?.outflow.minor).toBe(100_000);
+    // Neither list is dropped, and the two are never added together.
+    expect(card.rows[0]?.isScheduled).toBe(false);
+    expect(card.scheduled[0]?.isScheduled).toBe(true);
+  });
+
+  it("treats a batch dated today as paid, not scheduled", () => {
+    const card = buildBatchPaymentCard([batch({ DateString: "2026-10-27T00:00:00" })], {
+      ...GBP,
+      now: new Date("2026-10-27T12:00:00Z"),
+    });
+
+    expect(card.rows).toHaveLength(1);
+    expect(card.scheduled).toEqual([]);
+  });
+
+  it("keeps a scheduled batch in the integrity bucket when it does not tie", () => {
+    const card = buildBatchPaymentCard(
+      [batch({ DateString: "2026-11-02T00:00:00", TotalAmount: 300.01 })],
+      { ...GBP, now: new Date("2026-10-27T12:00:00Z") },
+    );
+
+    expect(card.rows).toEqual([]);
+    expect(card.integrityBucket).toHaveLength(1);
+    expect(card.integrityBucket[0]?.isScheduled).toBe(true);
+  });
+
+  it("flags a batch holding exactly 200 payments, and not 199", () => {
+    // Confirmed live on 2026-10-27: both 200-member batches returned 200 members and 200
+    // distinct PaymentIDs when read individually, and tie to their totals — so this is a
+    // flag for a human, not an error. A cap would tie too, which is why it exists.
+    const members = (count: number) =>
+      Array.from({ length: count }, (_, index) => ({
+        PaymentID: `p-${index}`,
+        Amount: 1,
+        BankAmount: 1,
+      }));
+
+    const flagged = buildBatchPaymentCard(
+      [batch({ TotalAmount: 200, Payments: members(200) })],
+      GBP,
+    );
+    expect(flagged.memberCountFlagged).toHaveLength(1);
+    expect(flagged.integrityBucket).toEqual([]);
+
+    const notFlagged = buildBatchPaymentCard(
+      [batch({ TotalAmount: 199, Payments: members(199) })],
+      GBP,
+    );
+    expect(notFlagged.memberCountFlagged).toEqual([]);
   });
 
   it("reports a batch with neither TotalAmount nor Amount instead of treating it as zero", () => {

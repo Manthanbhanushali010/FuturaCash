@@ -8,9 +8,9 @@ import type { XeroBatchPayment } from "./schemas";
  * The standalone Batch payments card — a pure projection, no I/O.
  *
  * DELIBERATELY NOT PART OF `reconcile`, and this is the whole point of the module existing
- * separately. A batch payment is money that has already left the bank, so it is already
- * inside the bank-transaction read: measured live, the 26 batches in a 30-day window summed
- * to 661,964.41 GBP and the 619 member payments excluded from that same window as
+ * separately. A batch payment that has been paid is money already out of the bank, so it is
+ * already inside the bank-transaction read: measured live, the 26 batches in a 30-day window
+ * summed to 661,964.41 GBP and the 619 member payments excluded from that same window as
  * BATCH_MEMBER summed to exactly the same figure. Adding batch totals to any cash position
  * would therefore double-count. This module consequently produces NO net figure, no grand
  * total and no single number that mixes directions — only per-currency, per-direction
@@ -23,6 +23,20 @@ import type { XeroBatchPayment } from "./schemas";
 
 /** Whether a batch's own total agrees with the payments nested inside it. */
 export type BatchTie = "TIES" | "MISMATCH" | "UNCHECKABLE";
+
+/**
+ * A member count worth showing, because it is suspiciously round.
+ *
+ * Two of JENKI's 22 live batches hold exactly 200 members, which is the shape a silent
+ * per-batch member cap would take. Both were then read individually
+ * (`GET /BatchPayments/{id}`, 2026-10-27): 200 members again, 200 distinct PaymentIDs, and
+ * the members summed to the batch total to the penny in both reads — so 200 is a real count
+ * here, not a truncation. The flag stays because that conclusion is about today's data: a
+ * cap, if one is ever introduced, would look exactly like this, and the integrity bucket
+ * would only catch it if the total disagreed. Flagged for a human to confirm, never silently
+ * treated as either complete or truncated.
+ */
+export const MEMBER_COUNT_TO_FLAG = 200;
 
 export interface BatchPaymentRow {
   externalId: string;
@@ -48,6 +62,13 @@ export interface BatchPaymentRow {
   tie: BatchTie;
   /** Why the batch is in the integrity bucket. Null when it ties. */
   tieReason: string | null;
+  /**
+   * Dated after `now` — authorised but not yet paid.
+   *
+   * Kept on the row as well as in its own list so the integrity bucket and the member-count
+   * flag can say which section an entry came from.
+   */
+  isScheduled: boolean;
 }
 
 /**
@@ -55,7 +76,7 @@ export interface BatchPaymentRow {
  *
  * Crossing currencies is the documented rule. Crossing directions is worse and unstated:
  * PAYBATCH is money out and RECBATCH is money in, so one "total batch payments" figure would
- * net a supplier run against a customer receipt and mean nothing at all. Both lives here as
+ * net a supplier run against a customer receipt and mean nothing at all. Both live here as
  * separate fields so no caller can accidentally produce either.
  */
 export interface BatchCurrencySubtotal {
@@ -67,26 +88,30 @@ export interface BatchCurrencySubtotal {
 }
 
 export interface BatchPaymentCard {
+  /** Batches dated on or before `now`: money that has moved. */
   rows: BatchPaymentRow[];
+  /**
+   * Batches dated after `now`: authorised, scheduled, NOT yet paid.
+   *
+   * Separate from `rows` rather than mixed in, because the two carry different claims. A
+   * paid batch is already inside the bank-transaction read, so counting it again would
+   * double-count; a scheduled one is in no bank read at all, so the "already included"
+   * label is simply false of it. One list with one label could only be wrong about one of
+   * them.
+   */
+  scheduled: BatchPaymentRow[];
+  /** Over `rows` only. */
   subtotals: BatchCurrencySubtotal[];
+  /** Over `scheduled` only, and never added to `subtotals`. */
+  scheduledSubtotals: BatchCurrencySubtotal[];
   /**
    * MUST BE EMPTY. Any batch whose total does not equal its nested members' sum, or whose
-   * members cannot be summed at all.
-   *
-   * An empty bucket is a real assertion rather than a decoration: two of the 22 live batches
-   * hold exactly 200 members, which is the shape a silent nested-member cap would take, and
-   * both tie to the penny — so the bucket is also the detector for that cap appearing.
+   * members cannot be summed at all. Spans paid and scheduled alike — internal consistency
+   * is not a property of when a batch is dated.
    */
   integrityBucket: BatchPaymentRow[];
-  /**
-   * Batches dated after `now`.
-   *
-   * The window has a lower bound only, so a future-dated batch is inside it: JENKI has one
-   * dated 2026-11-02. Counted and stated rather than filtered, because a scheduled supplier
-   * run is real information — it just is not "the last 30 days", and a card claiming to show
-   * only the last 30 days while listing November would be lying in small print.
-   */
-  futureDated: number;
+  /** Batches holding exactly `MEMBER_COUNT_TO_FLAG` members. See that constant. */
+  memberCountFlagged: BatchPaymentRow[];
   failures: NormalisationFailure[];
 }
 
@@ -162,6 +187,7 @@ function summariseMembers(
 function toRow(
   batch: XeroBatchPayment,
   options: BuildBatchPaymentCardOptions,
+  now: Date,
 ): BatchPaymentRow {
   const currency = batchCurrency(batch, options.fallbackCurrency);
   const total = batchTotal(batch, currency);
@@ -177,9 +203,11 @@ function toRow(
     tieReason = `total ${total.minor} does not equal the sum of ${members.count} nested payment(s), ${members.total.minor}`;
   }
 
+  const paidAt = parseXeroDate(batch.Date, batch.DateString);
+
   return {
     externalId: batch.BatchPaymentID,
-    paidAt: parseXeroDate(batch.Date, batch.DateString),
+    paidAt,
     direction: batchDirection(batch.Type ?? ""),
     providerType: batch.Type ?? "",
     providerStatus: batch.Status ?? "",
@@ -188,31 +216,14 @@ function toRow(
     memberTotal: members.total,
     tie,
     tieReason,
+    // An undated batch is treated as in-window, not scheduled: the window filter is a
+    // `Date>=` predicate Xero applied server-side, so a record it returned cannot have had
+    // no date to compare. Live, `Date` is present on 22 of 22.
+    isScheduled: paidAt !== null && Date.parse(paidAt) > now.getTime(),
   };
 }
 
-export function buildBatchPaymentCard(
-  batches: readonly XeroBatchPayment[],
-  options: BuildBatchPaymentCardOptions,
-): BatchPaymentCard {
-  const now = options.now ?? new Date();
-  const rows: BatchPaymentRow[] = [];
-  const failures: NormalisationFailure[] = [];
-
-  for (const batch of batches) {
-    try {
-      rows.push(toRow(batch, options));
-    } catch (error) {
-      // Collected, never thrown: one unparseable batch must not blank the card, and a
-      // reported gap is the only honest alternative to a silently shorter list.
-      failures.push({
-        externalId: batch.BatchPaymentID ?? null,
-        reason: (error as Error).message,
-        raw: batch,
-      });
-    }
-  }
-
+function subtotalsOf(rows: readonly BatchPaymentRow[]): BatchCurrencySubtotal[] {
   const byCurrency = new Map<CurrencyCode, BatchCurrencySubtotal>();
   for (const row of rows) {
     const currency = row.total.currency;
@@ -234,14 +245,41 @@ export function buildBatchPaymentCard(
     }
     byCurrency.set(currency, subtotal);
   }
+  return [...byCurrency.values()].sort((a, b) => a.currency.localeCompare(b.currency));
+}
 
-  const futureAt = now.getTime();
+export function buildBatchPaymentCard(
+  batches: readonly XeroBatchPayment[],
+  options: BuildBatchPaymentCardOptions,
+): BatchPaymentCard {
+  const now = options.now ?? new Date();
+  const all: BatchPaymentRow[] = [];
+  const failures: NormalisationFailure[] = [];
+
+  for (const batch of batches) {
+    try {
+      all.push(toRow(batch, options, now));
+    } catch (error) {
+      // Collected, never thrown: one unparseable batch must not blank the card, and a
+      // reported gap is the only honest alternative to a silently shorter list.
+      failures.push({
+        externalId: batch.BatchPaymentID ?? null,
+        reason: (error as Error).message,
+        raw: batch,
+      });
+    }
+  }
+
+  const rows = all.filter((row) => !row.isScheduled);
+  const scheduled = all.filter((row) => row.isScheduled);
+
   return {
     rows,
-    subtotals: [...byCurrency.values()].sort((a, b) => a.currency.localeCompare(b.currency)),
-    integrityBucket: rows.filter((row) => row.tie !== "TIES"),
-    futureDated: rows.filter((row) => row.paidAt !== null && Date.parse(row.paidAt) > futureAt)
-      .length,
+    scheduled,
+    subtotals: subtotalsOf(rows),
+    scheduledSubtotals: subtotalsOf(scheduled),
+    integrityBucket: all.filter((row) => row.tie !== "TIES"),
+    memberCountFlagged: all.filter((row) => row.memberCount === MEMBER_COUNT_TO_FLAG),
     failures,
   };
 }
