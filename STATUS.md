@@ -144,6 +144,55 @@ Finish the Xero data foundation (core cash-flow endpoints) before building the f
   reported as a normalisation failure. `core/` is protected, so this needs a deliberate call.
 - The forecast engine itself — not started. Everything above is still data foundation.
 
+## BATCH PAYMENTS CARD — built 2026-10-27, `feature/batch-payments-card` (`35544b3`), UNMERGED
+
+Branched from `origin/main` because **PR #1 is still OPEN** — its three commits (`6d93f7a`,
+`447647a`, `83489d2`) are not on main, so this branch needs a rebase after that merges. None
+of them are touched here.
+
+Standalone, and additional to nothing: the subtitle says "Already included in bank
+transactions. Not additional.", and `reconcile` does not import it — asserted by a source-level
+test in both directions, because wiring it in would double-count money that has already left
+the bank.
+
+Live, 2026-10-27, 30-day window: **22 batches — 7 in at 35,240.28 GBP, 15 out at
+706,760.52 GBP**, both tying to an independent survey to the penny. Integrity bucket **0**,
+failures **0**, one batch dated **2026-11-02** (the window has a lower bound only, so a
+scheduled batch is inside it — counted and stated, not filtered).
+
+What the survey corrected before any code was written:
+- **A batch carries NO currency field.** It is `Account.CurrencyCode`, 22 of 22, nothing at the
+  top level. `normaliseBatchPayment` stamped every batch with the org base currency — right
+  until the day it is not. JENKI holds Global Wallet accounts in **CAD, AUD, JPY and EUR**, so
+  that day is foreseeable. Now read from the account; a batch with neither is a reported
+  failure rather than a guess.
+- **Two live batches hold exactly 200 members**, the shape a silent nested-member cap would
+  take. Both tie to the penny, so the integrity bucket doubles as the detector if it appears.
+- Nested members carry `PaymentID`, `Amount` and `BankAmount` and nothing else — no status, no
+  type, no date. The member count therefore costs no second read.
+
+The bucket compares the batch total to the sum of members' **`BankAmount`, not `Amount`**:
+`Amount` is in the invoice's currency, `BankAmount` in the bank account's, and the total is
+quoted in the bank account's. Summing `Amount` would invent a mismatch under a currency rate.
+A member missing `BankAmount` is `UNCHECKABLE` rather than silently compared, and still lands
+in the bucket.
+
+Subtotals never cross a currency OR a direction. The second is unstated but worse: one "total
+batch payments" figure would net a supplier run against a customer receipt.
+
+`maxDuration = 60` now set explicitly on `/xero` (valid on either Vercel plan — still
+unconfirmed) and the card is behind `Suspense`. Measured on the live connection, median of
+three: **TTFB 9.97s → 10.08s, full response 10.01s → 12.14s.** The existing page is not slowed;
+the batch read arrives after the shell.
+
+Ten mutations verified to fail on the intended assertion. **One passed first and found a real
+gap:** swapping the member sum to `Amount` broke nothing, because the test covered the
+missing-`BankAmount` guard rather than the basis. Pinning it needs a constructed rate, since
+the two are identical on all 722 live members.
+
+**The render has no test** — no DOM environment in devDependencies — so the live check above is
+the only proof of that path, exactly as with the `/xero` re-consent notice.
+
 ## PAYMENT FAMILY SURVEY — live, 2026-10-22 (read this before building the four)
 
 Record counts: **Payments 24,520 · BatchPayments 1,421 · Overpayments 534 · Prepayments 0.**

@@ -298,6 +298,19 @@ Update this file after every meaningful implementation change.
   The render itself has no test — there is no DOM environment in devDependencies — so it is
   verified against production directly, which is the same standard applied to the scope deploy.
 
+- **A total with no currency of its own is a label waiting to be wrong** (2026-10-27) — the
+  batch-payments card needed per-currency subtotals, and `/BatchPayments` turned out to carry
+  no currency field at all: it is on `Account.CurrencyCode`, 22 of 22 live. The normaliser had
+  been stamping every batch with the org's base currency, which is indistinguishable from
+  correct while the two agree. JENKI holds Global Wallet bank accounts in CAD, AUD, JPY and
+  EUR, so they will not always agree. Found by surveying the payload before writing the
+  schema, which is the fourth time that order has caught something types could not.
+  The same card's integrity bucket compares a batch total to the sum of its members'
+  `BankAmount` rather than `Amount` — `Amount` is in the invoice's currency — and that
+  requirement was initially unpinned: a mutation swapping the basis passed every test, because
+  the test only covered the missing-field guard. The test that distinguishes them needs a
+  constructed currency rate, since the two are identical on all 722 live members.
+
 ## Session Notes
 
 - Build does not begin until commercial terms are signed (hard gate).
