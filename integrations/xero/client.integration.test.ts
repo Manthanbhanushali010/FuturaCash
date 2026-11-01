@@ -279,6 +279,62 @@ describe("authorised reads", () => {
     expect(payable!.total).toEqual({ minor: 816, currency: "GBP" });
   });
 
+  it("renders the rest of the snapshot when /Organisation fails", async () => {
+    // Measured 2026-10-28: a Xero-side 503 on this ONE endpoint blanked four healthy reads.
+    // /Organisation is the first call and was awaited outside the Promise.all, so its failure
+    // took the whole page with it. The organisation name is context; the money is the point.
+    stubFetch((url) => {
+      if (url.includes("/Organisation")) {
+        return {
+          status: 503,
+          body: "upstream connect error or disconnect/reset before headers. reset reason: overflow",
+        };
+      }
+      return defaultHandler(url);
+    });
+
+    const snapshot = await readXeroSnapshot();
+
+    expect(snapshot.organisation).toBeNull();
+    expect(snapshot.organisationError).toContain("503");
+    // The reads that have nothing to do with /Organisation all still arrived. (Bank
+    // transactions are skipped here because this fixture's grant lacks that scope, which is
+    // a separate, already-tested path.)
+    expect(snapshot.accounts.items).toHaveLength(2);
+    expect(snapshot.accounts.failures).toEqual([]);
+    expect(snapshot.commitments.items).toHaveLength(2);
+    expect(snapshot.commitments.failures).toEqual([]);
+    expect(snapshot.tenantName).toBe("Demo Company (UK)");
+  });
+
+  it("falls back to the default base currency when the org read failed, and says so", async () => {
+    // The fallback is not the problem; a SILENT fallback is. `organisationError` is what the
+    // screen uses to say the currency was assumed rather than read.
+    stubFetch((url) =>
+      url.includes("/Organisation") ? { status: 503, body: "overflow" } : defaultHandler(url),
+    );
+
+    const snapshot = await readXeroSnapshot();
+
+    expect(snapshot.organisationError).not.toBeNull();
+    expect(snapshot.commitments.items[0]!.total.currency).toBe("GBP");
+  });
+
+  it("still throws when /Organisation fails for a reason that is not Xero's", async () => {
+    // A bug in our own code must not be swallowed into a half-rendered page.
+    stubFetch((url) => {
+      if (url.includes("/Organisation")) throw new TypeError("programming error");
+      return defaultHandler(url);
+    });
+
+    await expect(readXeroSnapshot()).rejects.toBeInstanceOf(TypeError);
+  });
+
+  it("reports no organisation error on a healthy read", async () => {
+    stubFetch(defaultHandler);
+    expect((await readXeroSnapshot()).organisationError).toBeNull();
+  });
+
   it("refuses a total carrying more precision than the currency has", async () => {
     // Xero totals are 2dp. A 3dp total means our assumption about the payload is wrong, so
     // the record is reported rather than rounded into something plausible.

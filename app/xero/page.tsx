@@ -12,6 +12,7 @@ import {
 import { XeroApiError } from "@/integrations/xero/client";
 import { BatchPaymentsCard, BatchPaymentsCardSkeleton } from "./batch-payments";
 import { Card, Cell, Empty, Figure, Notice, Pill, Row, Table, formatDay } from "./parts";
+import { ReadFailureNotice, toReadFailure } from "./read-failure-view";
 
 /**
  * Spec 1 — read-only view of the connected Xero organisation.
@@ -148,15 +149,10 @@ async function Body() {
       );
     }
     if (caught instanceof XeroApiError) {
-      // Includes 429: surface it plainly rather than retrying into the rate limit.
-      return (
-        <Notice tone="error" title="Xero read failed">
-          <p>{caught.message}</p>
-          <div className="mt-4">
-            <ConnectLink label="Re-authorise" />
-          </div>
-        </Notice>
-      );
+      // Never retried: a 429 answered with another call is the problem, not the fix. The
+      // classification decides whether "Re-authorise" is offered at all — see
+      // `read-failure-view.tsx` for the incident that made that necessary.
+      return <ReadFailureNotice failure={toReadFailure(caught)} />;
     }
     throw caught;
   }
@@ -191,6 +187,18 @@ function Snapshot({ snapshot }: { snapshot: XeroSnapshot }) {
 
   return (
     <>
+      {snapshot.organisationError !== null ? (
+        <Notice tone="error" title="Organisation details could not be read">
+          <p>{snapshot.organisationError}</p>
+          <p className="mt-2 text-muted">
+            Everything below was read successfully and is unaffected. Two things are not known
+            because this call failed: the organisation&rsquo;s own details, and its base
+            currency — which has fallen back to GBP for any record that did not state its own.
+            Nothing is re-authorised for this, because the connection is not what failed.
+          </p>
+        </Notice>
+      ) : null}
+
       <Card
         title={snapshot.tenantName}
         subtitle={

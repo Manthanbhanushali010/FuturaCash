@@ -6,6 +6,7 @@ import type {
   NormalisedLedgerAccount,
 } from "../types";
 import {
+  XeroApiError,
   XeroNotConnectedError,
   fetchBankTransactions,
   fetchChartOfAccounts,
@@ -115,6 +116,15 @@ export interface XeroSnapshot {
   /** Scopes the code needs that this grant does not have. Non-empty means re-consent. */
   missingScopes: string[];
   accountsFromCache: boolean;
+  /**
+   * Why the organisation read failed, when it did. Null on success.
+   *
+   * Non-null means `organisation` is absent because Xero would not answer, NOT because the
+   * org has no details — and it means `baseCurrency` fell back to the default rather than
+   * being read. The screen has to say so: a silently assumed base currency is the exact
+   * shape of the bug this project keeps finding.
+   */
+  organisationError: string | null;
 }
 
 /**
@@ -131,7 +141,23 @@ export async function readXeroSnapshot(): Promise<XeroSnapshot> {
   }
   const tenantId = state.activeTenantId;
 
-  const organisation = await fetchOrganisation(tenantId);
+  // /Organisation is the FIRST call and it used to be the only one that could take the whole
+  // screen down with it. Measured 2026-10-28: a transport-layer 503 from Xero's gateway on
+  // this one endpoint blanked four healthy reads — accounts, invoices, bank transactions and
+  // batch payments were all still readable, and none of them were shown. The organisation
+  // name and base currency are context, not the point of the page, so a failure here is now
+  // reported alongside the data instead of in place of it.
+  let organisation: Awaited<ReturnType<typeof fetchOrganisation>> = null;
+  let organisationError: string | null = null;
+  try {
+    organisation = await fetchOrganisation(tenantId);
+  } catch (caught) {
+    // Only Xero's own failures degrade. A bug in our code still throws, because rendering a
+    // half-page over a programming error would hide it.
+    if (!(caught instanceof XeroApiError)) throw caught;
+    organisationError = caught.message;
+  }
+
   const baseCurrency = organisation?.BaseCurrency
     ? parseCurrency(organisation.BaseCurrency)
     : DEFAULT_BASE_CURRENCY;
@@ -175,5 +201,6 @@ export async function readXeroSnapshot(): Promise<XeroSnapshot> {
     bankTransactionsTruncated: bankTransactions.truncated,
     missingScopes: absent,
     accountsFromCache: accountsPage.cached,
+    organisationError,
   };
 }
