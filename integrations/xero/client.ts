@@ -48,9 +48,33 @@ export class XeroApiError extends Error {
     readonly status: number,
     readonly endpoint: string,
     readonly detail: string,
+    /**
+     * Xero's `Retry-After` in seconds, when it sent one. Null otherwise.
+     *
+     * Lives on the base class rather than only on the rate-limit subclass because a 503 can
+     * carry it too, and the screen needs the same answer regardless of which status produced
+     * it.
+     */
+    readonly retryAfterSeconds: number | null = null,
   ) {
     super(`Xero ${endpoint} failed with ${status}: ${detail}`);
     this.name = "XeroApiError";
+  }
+
+  /**
+   * Xero was unavailable or throttling us — NOT a statement about our authorisation.
+   *
+   * This distinction is the whole point. Production spent three re-authorisations on a
+   * transport-layer 503 (`upstream connect error ... reset reason: overflow`, 2026-10-28)
+   * because the screen offered a "Re-authorise" button for every `XeroApiError` alike. The
+   * grant was valid throughout; re-consenting could not have fixed it, and each attempt cost
+   * a round of Luke's time and ~20 calls of a budget that was already 92% spent.
+   *
+   * 5xx is Xero's side, 429 is pacing. Neither is fixed by a new token. 401/403 are, and
+   * they deliberately fall through to the re-authorise path.
+   */
+  get isBusy(): boolean {
+    return this.status === 429 || this.status >= 500;
   }
 }
 
@@ -58,10 +82,15 @@ export class XeroApiError extends Error {
 export class XeroRateLimitError extends XeroApiError {
   constructor(
     endpoint: string,
-    readonly retryAfterSeconds: number | null,
+    retryAfterSeconds: number | null,
     readonly limitType: string | null,
   ) {
-    super(429, endpoint, `rate limit reached (${limitType ?? "unknown limit"})`);
+    super(
+      429,
+      endpoint,
+      `rate limit reached (${limitType ?? "unknown limit"})`,
+      retryAfterSeconds,
+    );
     this.name = "XeroRateLimitError";
   }
 }
@@ -263,18 +292,60 @@ async function xeroGet(path: string, options: XeroGetOptions): Promise<unknown> 
     cache: "no-store",
   });
 
+  logRateHeaders(path, response);
+
   if (response.status === 429) {
-    const retryAfter = Number(response.headers.get("Retry-After"));
     throw new XeroRateLimitError(
       path,
-      Number.isFinite(retryAfter) ? retryAfter : null,
+      retryAfterSeconds(response),
       response.headers.get("X-Rate-Limit-Problem"),
     );
   }
   if (!response.ok) {
-    throw new XeroApiError(response.status, path, truncate(await response.text()));
+    throw new XeroApiError(
+      response.status,
+      path,
+      truncate(await response.text()),
+      retryAfterSeconds(response),
+    );
   }
   return safeJson(await response.text());
+}
+
+function retryAfterSeconds(response: Response): number | null {
+  const header = response.headers.get("Retry-After");
+  if (header === null) return null;
+  const seconds = Number(header);
+  // Xero sends an integer count of seconds. An HTTP-date is legal in the spec and would
+  // parse as NaN here, so it is reported as absent rather than rendered as "NaN seconds".
+  return Number.isFinite(seconds) && seconds >= 0 ? seconds : null;
+}
+
+/**
+ * Log Xero's rate-limit headers on EVERY response, success or failure.
+ *
+ * Without this the only way to know the remaining budget is to spend a call asking, which is
+ * how a day-limit problem stays invisible until everything 429s at once. On 2026-11-01 the
+ * daily allowance was 80% consumed by traffic that could not be attributed to anything in
+ * this repo, and the absence of these numbers in any log is precisely why it could not be.
+ *
+ * Deliberately numbers only — an endpoint path, a status and four counters. No query string
+ * (a `where` clause can name a supplier), no payload, no tenant id.
+ *
+ * NOTE: Vercel's Hobby plan retains no runtime logs, so these are visible in a live tail or
+ * in a local run and nowhere else. That is a reason to ship them, not to skip them: the next
+ * question of this kind is answerable the moment someone is watching.
+ */
+function logRateHeaders(path: string, response: Response): void {
+  const parts = [
+    `day=${response.headers.get("X-DayLimit-Remaining") ?? "-"}`,
+    `min=${response.headers.get("X-MinLimit-Remaining") ?? "-"}`,
+  ];
+  const problem = response.headers.get("X-Rate-Limit-Problem");
+  if (problem) parts.push(`problem=${problem}`);
+  const retry = retryAfterSeconds(response);
+  if (retry !== null) parts.push(`retryAfter=${retry}`);
+  console.info(`[xero] ${path} ${response.status} ${parts.join(" ")}`);
 }
 
 export async function fetchOrganisation(tenantId: string): Promise<XeroOrganisation | null> {
