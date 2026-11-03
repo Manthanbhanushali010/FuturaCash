@@ -1,3 +1,4 @@
+import Link from "next/link";
 import type { ReactNode } from "react";
 import {
   MEMBER_COUNT_TO_FLAG,
@@ -179,7 +180,7 @@ function Section({
             ))}
           </dl>
           <p className="px-5 py-3 text-xs text-muted">{note}</p>
-          <Table head={["Date", "Direction", "Status", "Payments", "Total"]}>
+          <Table head={["Date", "Direction", "Status", "Payments", "Total", ""]}>
             {rows.slice(0, MAX_ROWS).map((row) => (
               <Row key={row.externalId}>
                 <Cell muted>
@@ -202,6 +203,18 @@ function Section({
                 </Cell>
                 <Cell align="right">
                   <Figure value={row.total} />
+                </Cell>
+                <Cell align="right">
+                  {/* Only the batch id crosses into this link. No payee, invoice number or
+                      per-payment amount is in this page's HTML — those are read on the batch
+                      page itself, which is why the drill-down is a separate server page
+                      rather than data passed down to a client component. */}
+                  <Link
+                    href={`/xero/batches/${row.externalId}`}
+                    className="text-xs text-accent underline"
+                  >
+                    {row.memberCount} payment(s)
+                  </Link>
                 </Cell>
               </Row>
             ))}

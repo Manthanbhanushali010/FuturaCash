@@ -149,3 +149,45 @@ describe("the latent risk, pinned deliberately", () => {
     expect(JSON.stringify(card.failures[0]!.raw)).toContain(ACCOUNT_NUMBER);
   });
 });
+
+/**
+ * The drill-down added a link from every batch row. The link is the one thing that crosses
+ * from this page towards the member data, so what it carries is worth pinning: an id, and
+ * nothing else. Member detail is read on the batch page itself, which is why the drill-down
+ * is a separate server page rather than data handed to a client component.
+ */
+describe("the drill-down link", () => {
+  it("puts ONLY the batch id in the href", () => {
+    const card = buildBatchPaymentCard([batchWithSupplierDetail()], { fallbackCurrency: "GBP" });
+    const html = renderToStaticMarkup(<BatchPaymentsView view={readyView(card)} />);
+
+    expect(html).toContain('href="/xero/batches/batch-synthetic-1"');
+    for (const secret of SECRETS) {
+      expect(html).not.toContain(secret);
+    }
+  });
+
+  it("puts no payee, invoice number or account number in the INITIAL /xero HTML", () => {
+    // The whole page, not just the one row: a payee reaching this markup would be published
+    // to everyone holding the shared password, with no per-viewer identity behind it.
+    const card = buildBatchPaymentCard(
+      [
+        batchWithSupplierDetail(),
+        batchWithSupplierDetail({
+          BatchPaymentID: "batch-synthetic-2",
+          DateString: "2099-01-01T00:00:00",
+          Date: "2099-01-01T00:00:00",
+        }),
+      ],
+      { fallbackCurrency: "GBP" },
+    );
+    const html = renderToStaticMarkup(<BatchPaymentsView view={readyView(card)} />);
+
+    for (const secret of SECRETS) {
+      expect(html).not.toContain(secret);
+    }
+    // Both sections link out, so the paid and scheduled paths are both covered.
+    expect(html).toContain('href="/xero/batches/batch-synthetic-1"');
+    expect(html).toContain('href="/xero/batches/batch-synthetic-2"');
+  });
+});
