@@ -328,6 +328,18 @@ Update this file after every meaningful implementation change.
   sections with two labels rather than one filter, because both facts are wanted — but the
   label "already included in bank transactions" is only true of one of them.
 
+- **Filtering before a dedupe is not the same as not counting** (2026-10-27) — the obvious fix
+  for future-dated records was to drop them from the reconciliation's input. Measured, that
+  changed the output by nothing: a dropped batch stops appearing in the dedupe's key sets, so
+  its 139 member payments are no longer recognised as duplicates and get counted individually
+  instead. OUT stayed identical to the penny while 100,324.65 GBP moved from one source label
+  to another. A dedupe must see every record; only the *counting* decision may depend on a
+  filter. Verified by running both variants over one captured live window.
+- **"Today" is a timezone question, not a clock reading** (2026-10-27) — asking whether a record
+  is future-dated in UTC gives the wrong answer for one hour a day, seven months a year, in
+  Europe/London. The boundary test has to be mid-summer: the UK leaves BST on 25 October 2026,
+  so "00:30 BST" in late October is GMT and exercises nothing.
+
 ## Session Notes
 
 - Build does not begin until commercial terms are signed (hard gate).

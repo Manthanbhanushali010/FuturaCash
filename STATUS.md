@@ -371,6 +371,68 @@ Record counts: **Payments 24,520 · BatchPayments 1,421 · Overpayments 534 · P
 - **`/Prepayments` is genuinely empty for JENKI** — 0 records, and 0 bank transactions of type
   SPEND-PREPAYMENT or RECEIVE-PREPAYMENT. Unsurveyable, and nothing is lost by deferring it.
 
+## SCHEDULED MONEY — built 2026-10-27, `feature/reconcile-asof` (`668d28f`), UNMERGED
+
+The reconciliation read with `Date>=` and no upper bound, so an authorised-but-unpaid record
+sat inside the window looking exactly like a settled one. **Measured live 2026-10-27: two
+batches dated 30 Oct and 2 Nov, worth 100,324.65 GBP, counted as OUTFLOW.** Per source, future
+dated in the live window: **BATCH_PAYMENT 2, PAYMENT 139 raw but 0 counted** (all 139 are
+members of those two batches, deduped away), **BANK 0 of 529, OVERPAYMENT 0 of 13.** GBP only.
+
+**LIVE RECOMPUTE WITH THE FIX, 30-day window, asOf 2026-10-27 Europe/London:**
+
+| | Records | Amount |
+|---|---:|---|
+| counted BANK_TRANSACTION | 118 | 951,289.00 GBP · 115.39 USD |
+| counted PAYMENT | 404 | 692,255.15 GBP |
+| counted BATCH_PAYMENT | 20 | 641,676.15 GBP |
+| counted OVERPAYMENT | 13 | 930.79 GBP |
+| **SCHEDULED BATCH_PAYMENT** | **2** | **100,324.65 GBP** |
+| excluded BANK · INTERNAL_TRANSFER | 398 | 1,025,082.12 GBP |
+| excluded PAYMENT · BATCH_MEMBER | 722 | 742,000.80 GBP |
+| excluded BANK · OVERPAYMENT_ALREADY_IN_BANK | 13 | 930.79 GBP |
+
+**IN 1,288,731.46 / OUT 997,419.63 GBP + 115.39 USD → NET +291,311.83 GBP.** Scheduled OUT
+100,324.65 GBP, held apart. `tiesOut: true`, **0 discrepancies, 0 warnings**, 0 normalisation
+failures. Before the fix the same window read +190,987.18 — understated by exactly the
+scheduled amount.
+
+**A new exact-penny tie, and it spans both classes:** counted batches 641,676.15 + scheduled
+100,324.65 = **742,000.80**, which is precisely what was removed as `PAYMENT · BATCH_MEMBER`.
+The dedupe still removes exactly the batches' total, across the counted/scheduled split.
+
+**`asOf` is a REQUIRED calendar date, injected, computed in the ORG timezone.**
+`calendarDateIn` uses `Intl` (the BST offset is a function of the date). `orgTimeZone()` reads
+`ORG_TIME_ZONE`, default `Europe/London` — tenant config for now; Xero's `/Organisation`
+returns its own enum (`GMTSTANDARDTIME`), so adopting it needs a mapping table and a verified
+read. A timestamp is rejected, never truncated. Note the recompute above shows org and UTC
+agreeing — BST ended 25 Oct, so the difference only appears between April and October.
+
+**SCHEDULED IS A THIRD CATEGORY**, not an exclusion. `tiesOut` now proves counted + excluded +
+scheduled = what came in.
+
+**THE ROUTING IS AT THE POINT OF COUNTING, NOT A FILTER ON THE INPUT — this is the fix.**
+Filtering future-dated records before the dedupe changes nothing: a dropped batch leaves
+`countedBatchIds` and `batchMemberIds`, so its 139 members stop being recognised as duplicates
+and are counted individually. **Measured: OUT stayed at 1,097,744.28 GBP exactly, with
+100,324.65 moving from BATCH_PAYMENT into PAYMENT and 139 warnings.** A test holds that trap.
+
+Scheduled records reach no period slice and not `unattributed`. **An UNDATED record is counted
+but now WARNS**, naming source and id: it is the one record classified on an absence rather
+than a value, and a conservative choice should not look like a measurement. The rule applies
+to all four sources including bank rows.
+
+**CROSS-CHECK TEST**: the card's scheduled total equals the reconciliation's scheduled batch
+total — **10,032,465 minor units** (84,109.55 + 16,215.10), asserted in the fixture. Both
+appear on `/xero`, so they can never disagree.
+
+Nine mutations fail on the intended assertion, including `asOf` in UTC (00:30 BST on 15 July —
+mid-summer deliberately) and the boundary flipped to `>=`.
+
+**MERGE ORDER: after PR #2 and PR #1.** The branch is main + PR #1 + PR #2 + this commit, so
+once both land it rebases onto main cleanly. The snapshot columns went back onto
+`feature/reconciliation-cache` as `23a1560`, independent of this.
+
 ## CROSS-ENDPOINT RECONCILIATION — built 2026-10-24, `integrations/xero/reconcile.ts`
 
 Pure function, unwired. Every input record lands in exactly one bucket — counted, or excluded
@@ -548,6 +610,61 @@ Dedupe keys in use: `batchExternalId`/`memberPaymentIds` (payments↔batches, bo
 `overpaymentExternalId` on bank rows (bank↔overpayments — matched on the LINK field, since the
 primary keys differ), `providerType.endsWith("-TRANSFER")` (transfers), and
 `amountIsLive`/`creditIsLive` for cancelled records.
+
+## BACKLOG — approved to RECORD, not to build (each its own tiny branch)
+
+Nothing here is started without an explicit go-ahead. See also the per-feature
+"LOGGED, NOT BUILT" list under the batch-payments card.
+
+### 1. Make `db:migrate` fail loudly
+
+`package.json:13` is still `"db:migrate": "prisma migrate dev"`, and `.env`'s `DATABASE_URL`
+points at **production**. `migrate dev` is not a read: it diffs, can prompt to reset, and
+creates a shadow database. One absent-minded `npm run db:migrate` is the single cheapest way
+to lose JENKI's data, and the only thing standing between that and the database today is
+remembering not to type it.
+
+**Verified harmless as it stands** (2026-10-27): nothing invokes it. `postinstall` runs
+`prisma generate` only, `build` is `next build`, there is no `vercel.json`, the Vercel project
+reports an unoverridden `npm run build`, and CI runs typecheck/lint/test/eval/build with no
+database and no env. So this is a latent footgun, not a live one.
+
+Proposed change — one line, no code paths touched, CI unaffected:
+
+```json
+"db:migrate": "echo 'REFUSED: prisma migrate dev must never run against production. Use migrate deploy against a non-production endpoint.' >&2 && exit 1"
+```
+
+Shape: own branch, one-line diff plus a note here. It cannot regress anything, because the
+script has no current caller. Reinstate a working `db:migrate` only once a non-production
+endpoint exists, pointed at that endpoint explicitly.
+
+### 2. Align the Node version across local, CI and Vercel
+
+Three versions, none of them pinned by the repo:
+
+| Where | Version | Source |
+|---|---|---|
+| Vercel (production) | **24.x** | project setting, read via `vercel project inspect` |
+| CI | **20** | `.github/workflows/ci.yml`, `actions/setup-node` |
+| Local | **20.11.1** | whatever is installed |
+
+`package.json` has no `engines` field and there is no `.nvmrc`, so nothing enforces agreement
+and the drift is invisible until something breaks. **Production runs a major version that CI
+has never executed** — the gate proves the build works on 20 and then ships it on 24. Node 24
+removes and changes APIs relative to 20, so a failure of that kind surfaces for the first time
+in front of a customer, which is exactly the class of defect the merge gate exists to catch.
+
+Not a pure repo change: **Vercel's Node version is a dashboard setting**, so whichever version
+is chosen, that one has to be set there too and the project redeployed.
+
+**The decision is which version**, and it is not mine:
+- **Node 22.x** — current LTS, the conservative choice; means changing Vercel down from 24.
+- **Node 24.x** — matches production today; means moving CI and local up, and accepting a
+  newer runtime than LTS.
+
+Then: `"engines": { "node": "<chosen>" }` in `package.json`, the same in `setup-node`, an
+`.nvmrc` for local, and the Vercel setting to match. Own branch, config only.
 
 ## Known gate (confirmed Oct 2026 — don't re-litigate)
 

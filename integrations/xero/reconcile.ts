@@ -1,5 +1,6 @@
 import { add, money, type CurrencyCode, type Money } from "../../core/money";
 import type { CommitmentDirection, NormalisedCommitment } from "../types";
+import { assertCalendarDate, toCalendarDay } from "./dates";
 import type { NormalisedBankTransaction, NormalisedProviderPayment } from "./types";
 
 /**
@@ -144,6 +145,28 @@ export interface Reconciliation {
   /** Counted records that fell in no supplied period. Null when every one was attributed. */
   unattributed: PeriodMovement | null;
   /**
+   * Records dated AFTER `asOf`: authorised, but the money has not moved yet.
+   *
+   * A third category alongside `counted` and `excluded`, not a kind of exclusion, because the
+   * two answer different questions. An exclusion says "this is a duplicate or a cancellation,
+   * do not count it"; this says "this is real and singular, but it is in the future". Folding
+   * them together would make a scheduled supplier run indistinguishable from a voided one.
+   *
+   * Measured on JENKI, 2026-10-27: two scheduled batches worth 100,324.65 GBP were being
+   * counted as OUTFLOW, understating net movement by that amount.
+   */
+  scheduled: SourceTotal[];
+  /** Scheduled cash, per direction. Deliberately NOT added to `movement`. */
+  scheduledMovement: Record<CommitmentDirection, Money[]>;
+  /**
+   * The calendar date this reconciliation treated as "today", echoed back.
+   *
+   * Reported because every figure here depends on it. A stored snapshot without it cannot be
+   * interpreted later: the same input reconciled against a different `asOf` yields a
+   * different net, and nothing about the numbers themselves reveals which day was used.
+   */
+  asOf: string;
+  /**
    * True when, for every source, counted + excluded equals everything that came in — by
    * record count and by amount, in every currency.
    */
@@ -168,6 +191,23 @@ export interface SourceFailures {
 }
 
 export interface ReconciliationInput {
+  /**
+   * The organisation's calendar date — `YYYY-MM-DD` — treated as "today". REQUIRED.
+   *
+   * INJECTED, never read from the clock in here. Two reasons, and both have already cost
+   * something on this project. A function that reads the clock cannot be tested against a
+   * boundary, and a figure computed from an unrecorded clock cannot be reproduced.
+   *
+   * IT MUST BE COMPUTED IN THE ORGANISATION'S TIMEZONE, not UTC — see `calendarDateIn` and
+   * `orgTimeZone`. JENKI is Europe/London, which is UTC+1 for seven months a year, so between
+   * midnight and 01:00 BST the UK day and the UTC day differ and a UTC-derived date classifies
+   * a whole day's real trading as scheduled for the future.
+   *
+   * A calendar date and not a timestamp, deliberately. Xero stamps a record's date at midnight,
+   * so comparing days avoids the off-by-a-day that a time-of-day bound produces — the same
+   * defect that put £62k in the wrong period slice.
+   */
+  asOf: string;
   payments: readonly NormalisedProviderPayment[];
   batchPayments: readonly NormalisedProviderPayment[];
   overpayments: readonly NormalisedProviderPayment[];
@@ -241,7 +281,9 @@ function isCancelled(status: string): boolean {
 }
 
 export function reconcile(input: ReconciliationInput): Reconciliation {
+  const asOf = assertCalendarDate(input.asOf, "asOf");
   const counted = new Map<ReconciliationSource, CurrencyBucket>();
+  const scheduled = new Map<ReconciliationSource, CurrencyBucket>();
   const excluded = new Map<string, { reason: ExclusionReason; source: ReconciliationSource; bucket: CurrencyBucket }>();
   const presented = new Map<ReconciliationSource, CurrencyBucket>();
   const movement: Record<CommitmentDirection, CurrencyBucket> = {
@@ -249,6 +291,10 @@ export function reconcile(input: ReconciliationInput): Reconciliation {
     OUTFLOW: new CurrencyBucket(),
   };
   const credit = new CurrencyBucket();
+  const scheduledMovement: Record<CommitmentDirection, CurrencyBucket> = {
+    INFLOW: new CurrencyBucket(),
+    OUTFLOW: new CurrencyBucket(),
+  };
   const discrepancies: string[] = [];
 
   // Period buckets, built once so attribution is a lookup rather than a second pass over the
@@ -306,12 +352,51 @@ export function reconcile(input: ReconciliationInput): Reconciliation {
     excluded.set(key, entry);
   };
 
+  /**
+   * Is this record dated after the organisation's today?
+   *
+   * Compared as calendar days, so a record Xero stamped 2026-10-27T00:00:00Z is "today" on
+   * 2026-10-27 rather than "the start of today and therefore past". An undated record is
+   * NOT treated as scheduled: it cannot be shown to be in the future, and quietly moving
+   * money out of the counted total on a guess is the opposite of what this module is for.
+   */
+  const isScheduled = (occurredAt: string | null): boolean =>
+    occurredAt !== null && toCalendarDay(occurredAt) > asOf;
+
   const count = (
     source: ReconciliationSource,
     amount: Money,
     direction: CommitmentDirection,
     occurredAt: string | null,
+    externalId: string,
   ) => {
+    // An undated record is counted, not guessed into the future — but it is never silent.
+    //
+    // It cannot be placed in a period, it cannot be tested against `asOf`, and it is the one
+    // record whose classification rests on an absence rather than a value. Counting it is the
+    // conservative choice (money that exists should appear in the total); saying so is what
+    // stops that choice from looking like a measurement. Live, every record carries a date,
+    // so a non-empty count here means Xero sent something new.
+    if (occurredAt === null) {
+      warnings.push(
+        `${source} ${externalId}: no date, so it could not be tested against asOf ${asOf} or attributed to a period — counted as money that has already moved.`,
+      );
+    }
+    // Routed HERE, at the point of counting, rather than by filtering the input — and that
+    // distinction is the whole fix. Removing future-dated records before the dedupe measurably
+    // changes nothing: a scheduled batch dropped from the input no longer appears in
+    // `countedBatchIds` or `batchMemberIds`, so its 139 member payments stop being recognised
+    // as duplicates and are counted individually instead. Measured on JENKI 2026-10-27, that
+    // left OUT at 1,097,744.28 GBP exactly as before, moving 100,324.65 GBP from BATCH_PAYMENT
+    // into PAYMENT and emitting 139 warnings. The dedupe must see every record; only the
+    // counting decision may depend on the date.
+    if (isScheduled(occurredAt)) {
+      bucketFor(scheduled, source).addMoney(amount);
+      scheduledMovement[direction].addMoney(amount);
+      // No `attribute` call: a scheduled record must not land in a period slice, or the
+      // period total inflates by money that has not moved.
+      return;
+    }
     bucketFor(counted, source).addMoney(amount);
     movement[direction].addMoney(amount);
     attribute(occurredAt, amount, direction);
@@ -345,7 +430,7 @@ export function reconcile(input: ReconciliationInput): Reconciliation {
       amount: batch.amount,
       memberIds: batch.memberPaymentIds,
     });
-    count("BATCH_PAYMENT", batch.amount, batch.direction, batch.paidAt);
+    count("BATCH_PAYMENT", batch.amount, batch.direction, batch.paidAt, batch.externalId);
   }
 
   // --- individual payments ------------------------------------------------
@@ -388,7 +473,7 @@ export function reconcile(input: ReconciliationInput): Reconciliation {
         `Payment ${payment.externalId} names batch ${payment.batchExternalId}, which is not in this read — counted individually, so it may double-count if that batch is read separately.`,
       );
     }
-    count("PAYMENT", amount, payment.direction, payment.paidAt);
+    count("PAYMENT", amount, payment.direction, payment.paidAt, payment.externalId);
   }
 
   // --- unallocated credit -------------------------------------------------
@@ -406,7 +491,7 @@ export function reconcile(input: ReconciliationInput): Reconciliation {
         exclude(source, "CANCELLED", record.amount);
         continue;
       }
-      count(source, record.amount, record.direction, record.paidAt);
+      count(source, record.amount, record.direction, record.paidAt, record.externalId);
       // Separate from movement: this is money sitting unapplied, not money that moved today.
       if (record.creditIsLive) credit.addMoney(record.remainingCredit);
     }
@@ -440,7 +525,13 @@ export function reconcile(input: ReconciliationInput): Reconciliation {
       continue;
     }
 
-    count("BANK_TRANSACTION", transaction.total, transaction.direction, transaction.bookedAt);
+    count(
+      "BANK_TRANSACTION",
+      transaction.total,
+      transaction.direction,
+      transaction.bookedAt,
+      transaction.externalId,
+    );
   }
 
   // --- requirement 6: does each batch equal the members we removed for it? ----
@@ -523,10 +614,16 @@ export function reconcile(input: ReconciliationInput): Reconciliation {
   // completeness has only moved the uncertainty somewhere less visible.
   for (const [source, incoming] of presented) {
     const countedBucket = counted.get(source);
+    const scheduledBucket = scheduled.get(source);
     const excludedBuckets = [...excluded.values()].filter((e) => e.source === source);
 
+    // counted + excluded + SCHEDULED. Adding a third category without extending this sum
+    // would have let `tiesOut` stay true while scheduled money vanished from the accounting —
+    // which is precisely the kind of silent hole the tie-out exists to make impossible.
     const totalRecords =
-      (countedBucket?.count ?? 0) + excludedBuckets.reduce((n, e) => n + e.bucket.count, 0);
+      (countedBucket?.count ?? 0) +
+      (scheduledBucket?.count ?? 0) +
+      excludedBuckets.reduce((n, e) => n + e.bucket.count, 0);
     if (totalRecords !== incoming.count) {
       discrepancies.push(
         `${source}: ${incoming.count} records in, ${totalRecords} accounted for — ${incoming.count - totalRecords} unclassified.`,
@@ -536,6 +633,7 @@ export function reconcile(input: ReconciliationInput): Reconciliation {
     for (const currency of incoming.currencies) {
       const accounted =
         (countedBucket?.minorFor(currency) ?? 0) +
+        (scheduledBucket?.minorFor(currency) ?? 0) +
         excludedBuckets.reduce((n, e) => n + e.bucket.minorFor(currency), 0);
       if (accounted !== incoming.minorFor(currency)) {
         discrepancies.push(
@@ -546,7 +644,15 @@ export function reconcile(input: ReconciliationInput): Reconciliation {
   }
 
   return {
+    asOf,
     movement: { INFLOW: movement.INFLOW.byCurrency, OUTFLOW: movement.OUTFLOW.byCurrency },
+    scheduledMovement: {
+      INFLOW: scheduledMovement.INFLOW.byCurrency,
+      OUTFLOW: scheduledMovement.OUTFLOW.byCurrency,
+    },
+    scheduled: [...scheduled.entries()]
+      .map(([source, bucket]) => ({ source, count: bucket.count, byCurrency: bucket.byCurrency }))
+      .sort((a, b) => a.source.localeCompare(b.source)),
     counted: [...counted.entries()]
       .map(([source, bucket]) => ({ source, count: bucket.count, byCurrency: bucket.byCurrency }))
       .sort((a, b) => a.source.localeCompare(b.source)),
