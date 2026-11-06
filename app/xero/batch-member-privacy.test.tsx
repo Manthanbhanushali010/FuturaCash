@@ -1,6 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { buildBatchPaymentCard } from "@/integrations/xero/batch-card";
+import { REDACTED } from "@/integrations/xero/redact";
 import type { XeroBatchPayment } from "@/integrations/xero/schemas";
 import { BatchPaymentsView, type BatchPaymentsView as View } from "./batch-payments-view";
 
@@ -8,8 +9,8 @@ import { BatchPaymentsView, type BatchPaymentsView as View } from "./batch-payme
  * Supplier detail nested inside a batch payment must not reach the browser.
  *
  * `GET /BatchPayments` returns each batch with its member payments inlined, and those members
- * carry `BankAccountNumber` — a supplier's actual bank account number, populated on 4,566 of
- * JENKI's 9,236 live members (surveyed 2026-11-01). Nothing on the card needs it. The card
+ * carry `BankAccountNumber` — a supplier's actual bank account number, populated on a large
+ * share of live members. Nothing on the card needs it. The card
  * shows a member COUNT and a summed total, so the whole member array is a pass-through that
  * exists only because Xero chose to inline it.
  *
@@ -134,19 +135,49 @@ describe("the rendered card", () => {
   });
 });
 
-describe("the latent risk, pinned deliberately", () => {
-  it("DOES still hold supplier detail in failures[].raw", () => {
-    // Asserted so the risk is visible rather than assumed away. Nothing renders `raw` today
-    // and there are no client components, so server-component props are never serialised to
-    // the browser — which is why the live page is clean. Both of those are conventions, not
-    // enforced boundaries. If `raw` is ever rendered, logged, or passed across a client
-    // boundary, this is the field that leaks, and this test says so out loud.
+describe("failures[].raw is redacted at capture", () => {
+  it("does NOT retain a supplier bank account number", () => {
+    // This assertion used to be inverted: it pinned that `raw` DID hold the number, so the
+    // risk was visible rather than assumed away. The only things keeping that off the page
+    // were conventions — nothing rendered `raw`, and there are no client components — and
+    // neither is enforced by anything. `redactForAudit` now strips it where the payload is
+    // captured, so the convention is no longer what protects it.
     const card = buildBatchPaymentCard(
       [batchWithSupplierDetail({ Account: { AccountID: "a", CurrencyCode: "CNY" } })],
       { fallbackCurrency: null },
     );
 
-    expect(JSON.stringify(card.failures[0]!.raw)).toContain(ACCOUNT_NUMBER);
+    expect(card.failures).toHaveLength(1);
+    expect(JSON.stringify(card.failures[0]!.raw)).not.toContain(ACCOUNT_NUMBER);
+  });
+
+  it("keeps the failure diagnosable — id, reason and member shape all survive", () => {
+    // Redaction must not turn a reported failure into a useless one.
+    const card = buildBatchPaymentCard(
+      [batchWithSupplierDetail({ Account: { AccountID: "a", CurrencyCode: "CNY" } })],
+      { fallbackCurrency: null },
+    );
+    const failure = card.failures[0]!;
+    const raw = failure.raw as { Payments?: unknown[]; BatchPaymentID?: string };
+
+    expect(failure.externalId).toBeTruthy();
+    expect(failure.reason).toBeTruthy();
+    expect(raw.BatchPaymentID).toBe(failure.externalId);
+    expect(raw.Payments).toHaveLength(2);
+    // The key is still there, marked — so "Xero sent nothing" stays distinguishable from
+    // "we removed it".
+    expect((raw.Payments as Array<Record<string, unknown>>)[0]!.BankAccountNumber).toBe(
+      REDACTED,
+    );
+  });
+
+  it("redacts every secret the fixture carries, not just the account number", () => {
+    const card = buildBatchPaymentCard(
+      [batchWithSupplierDetail({ Account: { AccountID: "a", CurrencyCode: "CNY" } })],
+      { fallbackCurrency: null },
+    );
+    const serialised = JSON.stringify(card.failures[0]!.raw);
+    expect(serialised).not.toContain(ACCOUNT_NUMBER);
   });
 });
 

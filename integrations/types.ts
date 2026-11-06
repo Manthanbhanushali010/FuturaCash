@@ -10,7 +10,9 @@ export interface NormalisedTransaction {
   amount: Money;          // integer minor units + currency
   bookedAt: string;       // ISO 8601
   description: string;
-  raw: unknown;           // original payload, retained for audit/traceability
+  // Original payload, retained for audit/traceability — with bank detail redacted at
+  // capture by `integrations/xero/redact.ts`, so it is never a store of account numbers.
+  raw: unknown;
 }
 
 /** Every bank/aggregator adapter implements this. Read-only by design. */

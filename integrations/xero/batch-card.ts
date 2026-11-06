@@ -1,3 +1,4 @@
+import { redactForAudit } from "./redact";
 import { add, money, parseCurrency, type CurrencyCode, type Money } from "../../core/money";
 import type { CommitmentDirection, NormalisationFailure } from "../types";
 import { parseXeroDate } from "./dates";
@@ -265,7 +266,9 @@ export function buildBatchPaymentCard(
       failures.push({
         externalId: batch.BatchPaymentID ?? null,
         reason: (error as Error).message,
-        raw: batch,
+        // Redacted at capture: this payload holds the member array Xero inlines, and a
+        // member can carry a supplier's bank account number. See ./redact.
+        raw: redactForAudit(batch),
       });
     }
   }
