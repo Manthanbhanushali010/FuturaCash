@@ -1,5 +1,6 @@
 import { decimalToMinorUnits } from "../../core/decimal";
 import { minorUnitDigits, money, parseCurrency, type CurrencyCode, type Money } from "../../core/money";
+import { redactForAudit } from "./redact";
 import type {
   CommitmentDirection,
   CommitmentStatus,
@@ -112,7 +113,7 @@ export function normaliseInvoice(
     total: toMoney(invoice.Total, currency, "Total"),
     amountDue: toMoney(invoice.AmountDue, currency, "AmountDue"),
     amountPaid: toMoney(invoice.AmountPaid, currency, "AmountPaid"),
-    raw: invoice,
+    raw: redactForAudit(invoice),
   };
 }
 
@@ -166,7 +167,7 @@ export function normaliseBankTransaction(
     subTotal: toMoney(transaction.SubTotal, currency, "SubTotal"),
     totalTax: toMoney(transaction.TotalTax, currency, "TotalTax"),
     total: toMoney(transaction.Total, currency, "Total"),
-    raw: transaction,
+    raw: redactForAudit(transaction),
   };
 }
 
@@ -297,7 +298,7 @@ export function normalisePayment(
     statementLineExternalId: null,
     // Already applied to a document by definition.
     remainingCredit: money(0, currency),
-    raw: payment,
+    raw: redactForAudit(payment),
   };
 }
 
@@ -366,7 +367,7 @@ export function normaliseBatchPayment(
     batchExternalId: null, // it IS the batch
     statementLineExternalId: batch.ReconciledStatementLineId ?? null,
     remainingCredit: money(0, currency),
-    raw: batch,
+    raw: redactForAudit(batch),
   };
 }
 
@@ -415,7 +416,7 @@ export function normaliseUnallocatedCredit(
     statementLineExternalId: null,
     // The cash-relevant figure: money in the bank with nothing matched against it yet.
     remainingCredit: toMoney(credit.RemainingCredit, currency, "RemainingCredit"),
-    raw: credit,
+    raw: redactForAudit(credit),
   };
 }
 
@@ -458,9 +459,9 @@ export function normaliseAccount(account: XeroAccount): NormalisedLedgerAccount 
     // Xero omits CurrencyCode on non-bank accounts; those follow the org base currency.
     currency: account.CurrencyCode ? parseCurrency(account.CurrencyCode) : null,
     isBankAccount: account.Type === "BANK",
-    // BankAccountNumber is deliberately NOT lifted into the normalised model — it is account
-    // PII with no forecasting use. It stays in `raw` for audit only.
-    raw: account,
+    // BankAccountNumber is neither lifted into the normalised model nor retained in `raw` —
+    // it is account PII with no forecasting use, and `redactForAudit` strips it at capture.
+    raw: redactForAudit(account),
   };
 }
 
@@ -496,7 +497,7 @@ function collect<TRaw, TOut>(
       result.failures.push({
         externalId: identify(item) ?? null,
         reason: (error as Error).message,
-        raw: item,
+        raw: redactForAudit(item),
       });
     }
   }
@@ -596,7 +597,7 @@ export function normaliseCreditNote(
     currencyRate: note.CurrencyRate ?? null,
     lines,
     trackingByCategory,
-    raw: note,
+    raw: redactForAudit(note),
   };
 }
 
