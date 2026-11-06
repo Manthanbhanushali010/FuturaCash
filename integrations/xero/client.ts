@@ -32,6 +32,7 @@ import {
   XeroCreditNote,
 } from "./schemas";
 import { toXeroDateTime } from "./dates";
+import { isXeroGuid } from "./guid";
 import {
   getXeroTokenStore,
   type XeroTenantConnection,
@@ -751,6 +752,87 @@ export interface FetchBatchPaymentsOptions {
  * `where` IS honoured here even though `page` is not — verified, 1,346 AUTHORISED and 75
  * DELETED of 1,421.
  */
+/**
+ * Page cap for a single batch's member payments.
+ *
+ * 5 pages is 500 members against a largest observed batch of 200, so the cap is headroom
+ * rather than a guess at the real maximum — and it is a cap, not a promise: when it is hit
+ * `truncated` is true and the page says so, because a footer total over an unknown subset of
+ * a batch is indistinguishable from a complete one.
+ */
+export const BATCH_MEMBER_MAX_PAGES = 5;
+
+/**
+ * The payments belonging to one batch.
+ *
+ * Verified live 2026-11-01 on a 136-member batch: `where=BatchPaymentID==guid("…")` IS
+ * honoured, returning 136 rows over 2 pages (100 then 36), every row carrying the requested
+ * id, none from another batch, and the `Amount` sum tying to the batch total to the penny.
+ * That matters because `Statuses=` is silently ignored on this endpoint — a filter working
+ * elsewhere says nothing about where it is used.
+ *
+ * DELIBERATELY NOT STATUS-FILTERED, unlike `fetchPayments`. The footer total has to tie to
+ * the batch's own `TotalAmount`, and that total is the sum of the batch's members whatever
+ * their status. Filtering to AUTHORISED would drop members and manufacture a mismatch — the
+ * opposite of the usual concern, where an unfiltered read includes cancelled money. Here the
+ * mismatch marker is the safety net, and it only means anything if both sides count the same
+ * records.
+ *
+ * `batchId` MUST already be a validated GUID — see ./guid. It is interpolated into the
+ * clause, so an unvalidated value could close the string literal and inject filter syntax.
+ */
+export async function fetchBatchMemberPayments(
+  tenantId: string,
+  batchId: string,
+  options: FetchPagedOptions = {},
+): Promise<PagedResult<XeroPayment>> {
+  if (!isXeroGuid(batchId)) {
+    // Defence in depth: the page validates before calling, and this refuses to build the
+    // clause at all if that is ever bypassed. Never a Xero call with an unvalidated id.
+    throw new XeroApiError(0, "/Payments", "batchId must be a GUID");
+  }
+  return fetchPaged<XeroPayment>(
+    "/Payments",
+    "Payments",
+    (body) => {
+      const p = PaymentsResponse.safeParse(body);
+      return p.success
+        ? { success: true, items: p.data.Payments }
+        : { success: false, detail: issues(p.error) };
+    },
+    tenantId,
+    { order: "Date DESC", where: `BatchPaymentID==guid("${batchId}")` },
+    { maxPages: options.maxPages ?? BATCH_MEMBER_MAX_PAGES },
+  );
+}
+
+/**
+ * One batch, by id — the authoritative source for its total and currency.
+ *
+ * Read individually rather than filtered out of the list read: the list is bounded to a
+ * reporting window, so a batch older than that window is simply absent from it, and a
+ * drill-down reached by URL must work for any batch. One call either way.
+ */
+export async function fetchBatchPaymentById(
+  tenantId: string,
+  batchId: string,
+): Promise<XeroBatchPayment | null> {
+  if (!isXeroGuid(batchId)) {
+    throw new XeroApiError(0, "/BatchPayments", "batchId must be a GUID");
+  }
+  // In the PATH, so validation also stops a traversal segment reaching the URL.
+  const body = await xeroGet(`/BatchPayments/${batchId}`, { tenantId });
+  const parsed = BatchPaymentsResponse.safeParse(body);
+  if (!parsed.success) {
+    throw new XeroApiError(
+      200,
+      "/BatchPayments/{id}",
+      `unexpected payload: ${issues(parsed.error)}`,
+    );
+  }
+  return parsed.data.BatchPayments[0] ?? null;
+}
+
 export async function fetchBatchPayments(
   tenantId: string,
   options: FetchBatchPaymentsOptions = {},
